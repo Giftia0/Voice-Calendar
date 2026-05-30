@@ -1,131 +1,68 @@
 import { StatusBar } from "expo-status-bar";
-import { Bell, Check, ChevronRight, Menu, Mic } from "lucide-react-native";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Easing,
   PanResponder,
+  Platform,
   SafeAreaView,
   ScrollView,
+  StatusBar as RNStatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View
 } from "react-native";
+import VoiceSheet from "./src/components/VoiceSheet";
+import MicButton from "./src/components/MicButton";
+import TopBar from "./src/components/TopBar";
+import EventRow from "./src/components/EventRow";
+import {
+  isSameDay,
+  getDateKey,
+  getMonthKey,
+  getCalendarDayIndex,
+  formatNavigationTitle,
+  getDayStartTime,
+  addDays,
+  createCalendarModel,
+} from "./src/components/calendarHelpers";
+import { weekDays, fullWeekDays } from "./src/components/calendarConstants";
+import * as C from "./src/components/constants";
+import { useVoiceInput } from "./src/components/useVoiceInput";
 
-const SHEET_HEIGHT = 300;
-const SHEET_BOTTOM = 18;
-const SHEET_CLOSED_Y = SHEET_HEIGHT + SHEET_BOTTOM + 12;
-const SHEET_CLOSE_THRESHOLD = 110;
-const MIC_SIZE = 64;
-const MIC_GAP = 16;
-const MIC_OPEN_BOTTOM = SHEET_BOTTOM + SHEET_HEIGHT + MIC_GAP;
-const MIC_CLOSED_BOTTOM = 24;
-const MIC_CLOSED_TRANSLATE_Y = MIC_OPEN_BOTTOM - MIC_CLOSED_BOTTOM;
-const PAGE_HORIZONTAL_PADDING = 22;
-const EVENT_ROW_HEIGHT = 92;
-const MARKER_CENTER_Y = 34;
-const DATE_BLOCK_HEIGHT = 49;
-const FLOATING_SUMMARY_HEIGHT = 60;
-const FLOATING_SUMMARY_TOP = 8;
-const FLOATING_SUMMARY_GAP = 22;
-const TIMELINE_LIST_HEADROOM = FLOATING_SUMMARY_TOP + FLOATING_SUMMARY_HEIGHT + FLOATING_SUMMARY_GAP;
-const TIMELINE_CONTENT_BOTTOM = 0;
-const TIMELINE_PULL_OPEN_THRESHOLD = 96;
-const TIMELINE_PULL_ELASTIC_DISTANCE = 125;
-const TIMELINE_PULL_INITIAL_RESISTANCE = 0.56;
-const CALENDAR_PULL_OPEN_THRESHOLD = 68;
-const CALENDAR_PULL_ELASTIC_DISTANCE = 260;
-const CALENDAR_PULL_INITIAL_RESISTANCE = 0.9;
-const CALENDAR_BOTTOM_GAP = 20;
-const DAY_SWIPE_EDGE_RESISTANCE = 0.28;
-const DAY_PREVIEW_WIDTH_RATIO = 0.5;
+const SHEET_CLOSED_Y = C.SHEET_CLOSED_Y;
+const MIC_CLOSED_TRANSLATE_Y = C.MIC_CLOSED_TRANSLATE_Y;
+const SHEET_CLOSE_THRESHOLD = C.SHEET_CLOSE_THRESHOLD;
+const PAGE_HORIZONTAL_PADDING = C.PAGE_HORIZONTAL_PADDING;
+const EVENT_ROW_HEIGHT = C.EVENT_ROW_HEIGHT;
+const MARKER_CENTER_Y = C.MARKER_CENTER_Y;
+const DATE_BLOCK_HEIGHT = C.DATE_BLOCK_HEIGHT;
+const FLOATING_SUMMARY_HEIGHT = C.FLOATING_SUMMARY_HEIGHT;
+const FLOATING_SUMMARY_TOP = C.FLOATING_SUMMARY_TOP;
+const FLOATING_SUMMARY_GAP = C.FLOATING_SUMMARY_GAP;
+const TIMELINE_LIST_HEADROOM = C.TIMELINE_LIST_HEADROOM;
+const TIMELINE_CONTENT_BOTTOM = C.TIMELINE_CONTENT_BOTTOM;
+const TIMELINE_PULL_OPEN_THRESHOLD = C.TIMELINE_PULL_OPEN_THRESHOLD;
+const TIMELINE_PULL_ELASTIC_DISTANCE = C.TIMELINE_PULL_ELASTIC_DISTANCE;
+const TIMELINE_PULL_INITIAL_RESISTANCE = C.TIMELINE_PULL_INITIAL_RESISTANCE;
+const CALENDAR_PULL_OPEN_THRESHOLD = C.CALENDAR_PULL_OPEN_THRESHOLD;
+const CALENDAR_PULL_ELASTIC_DISTANCE = C.CALENDAR_PULL_ELASTIC_DISTANCE;
+const CALENDAR_PULL_INITIAL_RESISTANCE = C.CALENDAR_PULL_INITIAL_RESISTANCE;
+const CALENDAR_BOTTOM_GAP = C.CALENDAR_BOTTOM_GAP;
+const DAY_SWIPE_EDGE_RESISTANCE = C.DAY_SWIPE_EDGE_RESISTANCE;
+const DAY_PREVIEW_WIDTH_RATIO = C.DAY_PREVIEW_WIDTH_RATIO;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 const events = [
+
   { time: "09:00", title: "周会", meta: "团队例会", tone: "soft" },
   { time: "11:30", title: "牙医", meta: "提前30分钟提醒", tone: "light" },
   { time: "15:00", title: "项目评审", meta: "会议室 A", tone: "primary" },
   { time: "18:30", title: "晚餐", meta: "家庭安排", tone: "warm" },
 ];
 
-const weekDays = ["一", "二", "三", "四", "五", "六", "日"];
-const fullWeekDays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 
-const isSameDay = (firstDate, secondDate) =>
-  firstDate.getFullYear() === secondDate.getFullYear() &&
-  firstDate.getMonth() === secondDate.getMonth() &&
-  firstDate.getDate() === secondDate.getDate();
-
-const getDateKey = (date) => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
-
-const getMonthKey = (date) => `${date.getFullYear()}-${date.getMonth()}`;
-
-const getCalendarDayIndex = (date) =>
-  Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / DAY_IN_MS);
-
-const formatNavigationTitle = (date, today = new Date()) => {
-  const dayDiff = getCalendarDayIndex(date) - getCalendarDayIndex(today);
-
-  if (Math.abs(dayDiff) <= 7) {
-    if (dayDiff === 0) {
-      return "今天";
-    }
-
-    if (dayDiff === -1) {
-      return "昨天";
-    }
-
-    if (dayDiff === 1) {
-      return "明天";
-    }
-
-    return dayDiff < 0 ? `${Math.abs(dayDiff)}天前` : `${dayDiff}天后`;
-  }
-
-  if (date.getFullYear() !== today.getFullYear()) {
-    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-  }
-
-  return `${date.getMonth() + 1}月${date.getDate()}日`;
-};
-
-const getDayStartTime = (date) =>
-  new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-
-const addDays = (date, amount) => {
-  const nextDate = new Date(date);
-  nextDate.setDate(nextDate.getDate() + amount);
-  return nextDate;
-};
-
-const createCalendarModel = (baseDate) => {
-  const year = baseDate.getFullYear();
-  const monthIndex = baseDate.getMonth();
-  const firstDayOfMonth = new Date(year, monthIndex, 1);
-  const mondayFirstOffset = (firstDayOfMonth.getDay() + 6) % 7;
-  const daysInMonth = new Date(year, monthIndex + 1, 0).getDate();
-  const visibleRows = Math.max(5, Math.ceil((mondayFirstOffset + daysInMonth) / 7));
-  const totalVisibleDays = visibleRows * 7;
-
-  return {
-    year,
-    month: monthIndex + 1,
-    day: baseDate.getDate(),
-    dateLabel: `${monthIndex + 1}月${baseDate.getDate()}日 ${fullWeekDays[baseDate.getDay()]}`,
-    title: `${year}年${monthIndex + 1}月`,
-    days: Array.from({ length: totalVisibleDays }, (_, index) => {
-      const date = new Date(year, monthIndex, 1 - mondayFirstOffset + index);
-      return {
-        id: `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`,
-        date,
-        day: date.getDate(),
-        isCurrentMonth: date.getMonth() === monthIndex,
-        isToday: isSameDay(date, baseDate)
-      };
-    })
-  };
-};
 
 export default function App() {
   const sheetY = useRef(new Animated.Value(0)).current;
@@ -157,22 +94,17 @@ export default function App() {
   const timelineScrollY = useRef(0);
   const timelineViewportHeight = useRef(0);
   const timelineContentHeight = useRef(0);
-  const recognitionRef = useRef(null);
-  const transcriptRef = useRef("");
-  const recognitionHadErrorRef = useRef(false);
   const chatScrollRef = useRef(null);
-  const messageIdRef = useRef(1);
   const [isSheetOpen, setIsSheetOpen] = useState(true);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const isCalendarOpenRef = useRef(false);
   const [calendarPanelHeight, setCalendarPanelHeight] = useState(0);
   const [dayPageWidthState, setDayPageWidthState] = useState(0);
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [calendarPreviewDate, setCalendarPreviewDate] = useState(null);
   const [dayTransitionTargetDate, setDayTransitionTargetDate] = useState(null);
   const [leavingDate, setLeavingDate] = useState(null);
-  const [isListening, setIsListening] = useState(false);
-  const [speechText, setSpeechText] = useState("");
-  const [speechError, setSpeechError] = useState("");
+  const [crossMonthSwipe, setCrossMonthSwipe] = useState(false);
   const [chatMessages, setChatMessages] = useState([
     {
       id: "assistant-welcome",
@@ -188,130 +120,70 @@ export default function App() {
   const navigationTitle = useMemo(() => formatNavigationTitle(fixedCalendarDate), [fixedCalendarKey]);
   const [displayedNavigationTitle, setDisplayedNavigationTitle] = useState(navigationTitle);
 
-  useEffect(() => {
-    if (!selectedDateRef.current) {
-      selectedDateRef.current = selectedDate;
+  const animateSheetRef = useRef(null);
+  const voice = useVoiceInput({ chatMessages, setChatMessages, animateSheetRef });
+
+  const animateSheet = useCallback((toValue, open) => {
+    setIsSheetOpen(open);
+    if (!open) {
+      voice.cancelSpeechRecognition();
     }
-  }, []);
-
-  useEffect(() => {
-    selectedDateRef.current = selectedDate;
-  }, [selectedDate]);
-
-  useEffect(() => {
-    calendarPreviewDateRef.current = calendarPreviewDate;
-  }, [calendarPreviewDate]);
-
-  useEffect(() => {
-    if (displayedNavigationTitle === navigationTitle) {
-      return;
-    }
-
-    const runId = navigationTitleAnimationRun.current + 1;
-    navigationTitleAnimationRun.current = runId;
-
-    navigationTitleOpacity.stopAnimation((currentOpacity) => {
-      Animated.timing(navigationTitleOpacity, {
-        toValue: 0,
-        duration: Math.max(40, Math.round(90 * currentOpacity)),
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true
-      }).start(({ finished }) => {
-        if (!finished || runId !== navigationTitleAnimationRun.current) {
-          return;
-        }
-
-        setDisplayedNavigationTitle(navigationTitle);
-
-        requestAnimationFrame(() => {
-          if (runId !== navigationTitleAnimationRun.current) {
-            return;
-          }
-
-          Animated.timing(navigationTitleOpacity, {
-            toValue: 1,
-            duration: 150,
-            easing: Easing.out(Easing.cubic),
-            useNativeDriver: true
-          }).start();
-        });
-      });
-    });
-  }, [displayedNavigationTitle, navigationTitle, navigationTitleOpacity]);
-
-  useEffect(() => {
-    if (!isListening) {
-      voiceBars.forEach((bar, index) => {
-        bar.stopAnimation();
-        bar.setValue([0.45, 0.72, 0.38, 0.86, 0.55][index]);
-      });
-      voicePulseA.stopAnimation();
-      voicePulseB.stopAnimation();
-      voicePulseA.setValue(0);
-      voicePulseB.setValue(0);
-      return undefined;
-    }
-
-    const barAnimations = voiceBars.map((bar, index) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(index * 90),
-          Animated.timing(bar, {
-            toValue: index % 2 === 0 ? 0.92 : 0.36,
-            duration: 230,
-            useNativeDriver: true
-          }),
-          Animated.timing(bar, {
-            toValue: index % 2 === 0 ? 0.34 : 1,
-            duration: 260,
-            useNativeDriver: true
-          }),
-          Animated.timing(bar, {
-            toValue: [0.58, 0.82, 0.48, 0.72, 0.62][index],
-            duration: 210,
-            useNativeDriver: true
-          })
-        ])
-      )
-    );
-    const createPulse = (value, delay) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(delay),
-          Animated.timing(value, {
-            toValue: 1,
-            duration: 1450,
-            useNativeDriver: true
-          }),
-          Animated.timing(value, {
-            toValue: 0,
-            duration: 0,
-            useNativeDriver: true
-          })
-        ])
-      );
-    const pulseAnimations = [createPulse(voicePulseA, 0), createPulse(voicePulseB, 650)];
-    const animations = [...barAnimations, ...pulseAnimations];
-
-    animations.forEach((animation) => animation.start());
-
-    return () => {
-      animations.forEach((animation) => animation.stop());
-    };
-  }, [isListening, voiceBars, voicePulseA, voicePulseB]);
-
-  useEffect(
-    () => () => {
-      recognitionRef.current?.stop();
-    },
-    []
-  );
+    Animated.spring(sheetY, {
+      toValue,
+      useNativeDriver: true,
+      damping: 24,
+      stiffness: 260,
+      mass: 0.9
+    }).start();
+  }, [voice.cancelSpeechRecognition, sheetY]);
+  animateSheetRef.current = animateSheet;
 
   useEffect(() => {
     requestAnimationFrame(() => {
       chatScrollRef.current?.scrollToEnd({ animated: true });
     });
-  }, [chatMessages, speechText, isListening]);
+  }, [chatMessages, voice.speechText, voice.isListening]);
+
+  useEffect(() => {
+    if (!voice.isListening) {
+      voiceBars.forEach((bar, i) => { bar.stopAnimation(); bar.setValue([0.45,0.72,0.38,0.86,0.55][i]); });
+      voicePulseA.stopAnimation(); voicePulseB.stopAnimation();
+      voicePulseA.setValue(0); voicePulseB.setValue(0);
+      return;
+    }
+    const barAnims = voiceBars.map((bar, i) => Animated.loop(Animated.sequence([
+      Animated.delay(i * 90),
+      Animated.timing(bar, { toValue: i % 2 === 0 ? 0.92 : 0.36, duration: 230, useNativeDriver: true }),
+      Animated.timing(bar, { toValue: i % 2 === 0 ? 0.34 : 1, duration: 260, useNativeDriver: true }),
+      Animated.timing(bar, { toValue: [0.58,0.82,0.48,0.72,0.62][i], duration: 210, useNativeDriver: true }),
+    ])));
+    const pA = Animated.loop(Animated.sequence([Animated.delay(0), Animated.timing(voicePulseA, { toValue: 1, duration: 1450, useNativeDriver: true }), Animated.timing(voicePulseA, { toValue: 0, duration: 0, useNativeDriver: true })]));
+    const pB = Animated.loop(Animated.sequence([Animated.delay(650), Animated.timing(voicePulseB, { toValue: 1, duration: 1450, useNativeDriver: true }), Animated.timing(voicePulseB, { toValue: 0, duration: 0, useNativeDriver: true })]));
+    [...barAnims, pA, pB].forEach(a => a.start());
+    return () => [...barAnims, pA, pB].forEach(a => a.stop());
+  }, [voice.isListening, voiceBars, voicePulseA, voicePulseB]);
+
+  useEffect(() => {
+    if (!selectedDateRef.current) selectedDateRef.current = selectedDate;
+  }, []);
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
+  useEffect(() => { calendarPreviewDateRef.current = calendarPreviewDate; }, [calendarPreviewDate]);
+
+  useEffect(() => {
+    if (displayedNavigationTitle === navigationTitle) return;
+    const runId = navigationTitleAnimationRun.current + 1;
+    navigationTitleAnimationRun.current = runId;
+    navigationTitleOpacity.stopAnimation((cur) => {
+      Animated.timing(navigationTitleOpacity, { toValue: 0, duration: Math.max(40, Math.round(90 * cur)), easing: Easing.out(Easing.quad), useNativeDriver: true }).start(({ finished }) => {
+        if (!finished || runId !== navigationTitleAnimationRun.current) return;
+        setDisplayedNavigationTitle(navigationTitle);
+        requestAnimationFrame(() => {
+          if (runId !== navigationTitleAnimationRun.current) return;
+          Animated.timing(navigationTitleOpacity, { toValue: 1, duration: 150, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+        });
+      });
+    });
+  }, [displayedNavigationTitle, navigationTitle, navigationTitleOpacity]);
 
   useEffect(() => {
     calendarActiveScale.stopAnimation();
@@ -348,147 +220,6 @@ export default function App() {
     });
   }, [leavingDate, calendarLeavingScale]);
 
-  const createMessageId = (prefix) => {
-    messageIdRef.current += 1;
-    return `${prefix}-${messageIdRef.current}`;
-  };
-
-  const appendAssistantMessage = ({ title = "助手回复", text, meta = "当前为固定占位回复" }) => {
-    setChatMessages((messages) => [
-      ...messages,
-      {
-        id: createMessageId("assistant"),
-        role: "assistant",
-        title,
-        text,
-        meta
-      }
-    ]);
-  };
-
-  const appendRecognizedConversation = (text) => {
-    setChatMessages((messages) => [
-      ...messages,
-      {
-        id: createMessageId("user"),
-        role: "user",
-        text
-      },
-      {
-        id: createMessageId("assistant"),
-        role: "assistant",
-        title: "助手回复",
-        text: "我会在这里展示解析后的日程结果",
-        meta: "当前为固定占位回复"
-      }
-    ]);
-  };
-
-  const stopSpeechRecognition = () => {
-    const recognition = recognitionRef.current;
-    if (recognition) {
-      try {
-        recognition.stop();
-      } catch {
-        // The browser may already have ended the recognition session.
-      }
-      recognitionRef.current = null;
-    }
-    setIsListening(false);
-  };
-
-  const startSpeechRecognition = () => {
-    const SpeechRecognition =
-      typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition);
-
-    if (!SpeechRecognition) {
-      appendAssistantMessage({
-        title: "识别提示",
-        text: "当前预览环境不支持语音识别",
-        meta: "请在 Chrome 或 Edge 浏览器中预览"
-      });
-      setIsListening(false);
-      return;
-    }
-
-    setSpeechText("");
-    setSpeechError("");
-    transcriptRef.current = "";
-    recognitionHadErrorRef.current = false;
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsListening(true);
-    };
-
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let index = 0; index < event.results.length; index += 1) {
-        transcript += event.results[index][0]?.transcript || "";
-      }
-      const nextText = transcript.trim();
-      transcriptRef.current = nextText;
-      setSpeechText(nextText);
-    };
-
-    recognition.onerror = (event) => {
-      const nextError = event.error === "not-allowed" ? "麦克风权限未开启" : "语音识别暂时不可用";
-      recognitionHadErrorRef.current = true;
-      setSpeechError(nextError);
-      appendAssistantMessage({
-        title: "识别提示",
-        text: nextError,
-        meta: "请检查麦克风权限后重试"
-      });
-      setIsListening(false);
-    };
-
-    recognition.onend = () => {
-      const finalText = transcriptRef.current.trim();
-      if (finalText && !recognitionHadErrorRef.current) {
-        appendRecognizedConversation(finalText);
-      }
-      setSpeechText("");
-      setIsListening(false);
-      recognitionRef.current = null;
-    };
-
-    recognitionRef.current?.stop();
-    recognitionRef.current = recognition;
-
-    try {
-      recognition.start();
-    } catch {
-      setSpeechError("语音识别启动失败");
-      appendAssistantMessage({
-        title: "识别提示",
-        text: "语音识别启动失败",
-        meta: "请稍后重试"
-      });
-      setIsListening(false);
-      recognitionRef.current = null;
-    }
-  };
-
-  const animateSheet = (toValue, open) => {
-    setIsSheetOpen(open);
-    if (!open) {
-      stopSpeechRecognition();
-    }
-    Animated.spring(sheetY, {
-      toValue,
-      useNativeDriver: true,
-      damping: 24,
-      stiffness: 260,
-      mass: 0.9
-    }).start();
-  };
-
   const isTimelineAtBottom = () =>
     timelineScrollY.current + timelineViewportHeight.current >= timelineContentHeight.current - 2;
 
@@ -516,14 +247,25 @@ export default function App() {
   };
 
   const animateCalendar = (toValue, open) => {
-    setIsCalendarOpen(open);
+    isCalendarOpenRef.current = open;
+    if (open) {
+      setIsCalendarOpen(true);
+    }
     Animated.spring(calendarHeight, {
       toValue,
       useNativeDriver: false,
-      damping: 24,
-      stiffness: 240,
-      mass: 0.9
-    }).start();
+      damping: 34,
+      stiffness: 400,
+      mass: 0.7,
+      restDisplacementThreshold: 0.5,
+      restSpeedThreshold: 0.5
+    }).start(({ finished }) => {
+      if (finished && !open) {
+        setIsCalendarOpen(false);
+        timelineScrollY.current = 0;
+        timelineScrollRef.current?.scrollTo({ y: 0, animated: false });
+      }
+    });
   };
 
   const handleTimelineScroll = (event) => {
@@ -575,6 +317,7 @@ export default function App() {
     const baseDate = selectedDateRef.current || selectedDate;
     const fixedDate = calendarPreviewDateRef.current || baseDate;
     const previewDate = targetDate ? new Date(targetDate) : addDays(baseDate, direction);
+    const isCrossMonthPreview = getMonthKey(baseDate) !== getMonthKey(previewDate);
 
     if (
       daySwipePreviewDirection.current === direction &&
@@ -585,6 +328,7 @@ export default function App() {
     }
 
     daySwipePreviewDirection.current = direction;
+    setCrossMonthSwipe(isCrossMonthPreview);
     primeCalendarHighlightAnimation();
     setLeavingDate(new Date(fixedDate));
     calendarPreviewDateRef.current = previewDate;
@@ -599,6 +343,7 @@ export default function App() {
     }
 
     daySwipePreviewDirection.current = 0;
+    setCrossMonthSwipe(false);
     primeCalendarHighlightAnimation();
     setLeavingDate(new Date(previewDate));
     calendarPreviewDateRef.current = null;
@@ -651,6 +396,7 @@ export default function App() {
       calendarPreviewDateRef.current = null;
       dayTransitionTargetDateRef.current = null;
       daySwipePreviewDirection.current = 0;
+      setCrossMonthSwipe(false);
       pendingDayDirection.current = 0;
       isDayTransitioning.current = false;
       setSelectedDate(nextSelectedDate);
@@ -713,6 +459,7 @@ export default function App() {
         onPanResponderGrant: () => {
           daySwipeRunId.current += 1;
           daySlideX.stopAnimation();
+          setCrossMonthSwipe(false);
           if (isDayTransitioning.current && pendingDayDirection.current) {
             const nextSelectedDate =
               dayTransitionTargetDateRef.current ||
@@ -802,17 +549,17 @@ export default function App() {
             return false;
           }
 
-          if (!isCalendarOpen && getCalendarPanelHeight() > 0 && isTimelineAtTopBoundary() && gesture.dy > 6) {
+          if (!isCalendarOpenRef.current && getCalendarPanelHeight() > 0 && isTimelineAtTopBoundary() && gesture.dy > 6) {
             timelineEdgeTarget.current = "calendar-open";
             return true;
           }
 
-          if (isCalendarOpen && gesture.dy < -6) {
+          if (isCalendarOpenRef.current && gesture.dy < -6) {
             timelineEdgeTarget.current = "calendar-close";
             return true;
           }
 
-          if (!isCalendarOpen && !isSheetOpen && isTimelineAtBottom() && gesture.dy < -6) {
+          if (!isCalendarOpenRef.current && !isSheetOpen && isTimelineAtBottom() && gesture.dy < -6) {
             timelineEdgeTarget.current = "sheet";
             return true;
           }
@@ -826,17 +573,17 @@ export default function App() {
             return false;
           }
 
-          if (!isCalendarOpen && getCalendarPanelHeight() > 0 && isTimelineAtTopBoundary() && gesture.dy > 6) {
+          if (!isCalendarOpenRef.current && getCalendarPanelHeight() > 0 && isTimelineAtTopBoundary() && gesture.dy > 6) {
             timelineEdgeTarget.current = "calendar-open";
             return true;
           }
 
-          if (isCalendarOpen && gesture.dy < -6) {
+          if (isCalendarOpenRef.current && gesture.dy < -6) {
             timelineEdgeTarget.current = "calendar-close";
             return true;
           }
 
-          if (!isCalendarOpen && !isSheetOpen && isTimelineAtBottom() && gesture.dy < -6) {
+          if (!isCalendarOpenRef.current && !isSheetOpen && isTimelineAtBottom() && gesture.dy < -6) {
             timelineEdgeTarget.current = "sheet";
             return true;
           }
@@ -846,6 +593,7 @@ export default function App() {
         },
         onPanResponderGrant: () => {
           if (timelineEdgeTarget.current === "calendar-open" || timelineEdgeTarget.current === "calendar-close") {
+            calendarHeight.stopAnimation();
             return;
           }
 
@@ -908,7 +656,7 @@ export default function App() {
         },
         onPanResponderTerminate: () => {
           if (timelineEdgeTarget.current === "calendar-open" || timelineEdgeTarget.current === "calendar-close") {
-            animateCalendar(isCalendarOpen ? getCalendarPanelHeight() : 0, isCalendarOpen);
+            animateCalendar(isCalendarOpenRef.current ? getCalendarPanelHeight() : 0, isCalendarOpenRef.current);
           }
 
           if (timelineEdgeTarget.current === "sheet") {
@@ -923,18 +671,6 @@ export default function App() {
 
   const toggleVoiceSheet = () => {
     animateSheet(isSheetOpen ? SHEET_CLOSED_Y : 0, !isSheetOpen);
-  };
-
-  const handleMicPress = () => {
-    if (isListening) {
-      stopSpeechRecognition();
-      return;
-    }
-
-    if (!isSheetOpen) {
-      animateSheet(0, true);
-    }
-    startSpeechRecognition();
   };
 
   const micTranslateY = sheetY.interpolate({
@@ -1029,28 +765,6 @@ export default function App() {
   }, [selectedDate, dayTransitionTargetDate]);
   const shouldSlideToPreviousMonth = getMonthKey(selectedDate) !== getMonthKey(previousDate);
   const shouldSlideToNextMonth = getMonthKey(selectedDate) !== getMonthKey(nextDate);
-  const shouldPrepareSlidingCalendar = shouldSlideToPreviousMonth || shouldSlideToNextMonth;
-  const calendarFadeDistance = Math.max(1, pagerWidth * 0.08);
-  const previousCalendarOpacity = daySlideX.interpolate({
-    inputRange: [0, calendarFadeDistance],
-    outputRange: [0, 1],
-    extrapolate: "clamp"
-  });
-  const nextCalendarOpacity = daySlideX.interpolate({
-    inputRange: [-calendarFadeDistance, 0],
-    outputRange: [1, 0],
-    extrapolate: "clamp"
-  });
-  const slidingCalendarOpacity = shouldSlideToPreviousMonth
-    ? previousCalendarOpacity
-    : nextCalendarOpacity;
-  const fixedCalendarOpacity = shouldPrepareSlidingCalendar
-    ? slidingCalendarOpacity.interpolate({
-        inputRange: [0, 1],
-        outputRange: [1, 0],
-        extrapolate: "clamp"
-      })
-    : 1;
 
   const renderCalendarDays = (model, isInteractive = true) =>
     model.days.map((day) => {
@@ -1133,18 +847,26 @@ export default function App() {
   const renderCalendarPanel = (
     date,
     isInteractive = false,
-    layerStyle = styles.paneCalendarLayer,
-    heightStyle = { height: calendarHeight }
+    layerStyle = styles.inlineCalendarLayer,
+    heightStyle = { height: calendarHeight },
+    counterTranslateX
   ) => {
     const model = createCalendarModel(date);
+
+    const pullPanelTransform = [{ translateY: calendarTranslateY }];
+    if (counterTranslateX) {
+      pullPanelTransform.push({ translateX: counterTranslateX });
+    }
+
+    const outerStyle = heightStyle ? [layerStyle, heightStyle] : layerStyle;
 
     return (
       <Animated.View
         pointerEvents={isInteractive ? "auto" : "none"}
-        style={[layerStyle, heightStyle]}
+        style={outerStyle}
       >
         <Animated.View
-          style={[styles.calendarPullPanel, { transform: [{ translateY: calendarTranslateY }] }]}
+          style={[styles.calendarPullPanel, { transform: pullPanelTransform }]}
         >
           <View style={styles.calendarPanel}>
             <View style={styles.weekRow}>
@@ -1190,21 +912,19 @@ export default function App() {
 
   const renderDayContent = (date, paneKey, isCurrentPane = false) => {
     const model = isCurrentPane ? calendarModel : createCalendarModel(date);
-    const shouldRenderPaneCalendar =
-      shouldPrepareSlidingCalendar &&
+    const shouldShowInlineCalendar =
+      isCalendarOpen &&
+      crossMonthSwipe &&
       (isCurrentPane ||
         (paneKey === "previous-day" && shouldSlideToPreviousMonth) ||
         (paneKey === "next-day" && shouldSlideToNextMonth));
-    const paneCalendarOpacity =
-      paneKey === "previous-day"
-        ? previousCalendarOpacity
-        : paneKey === "next-day"
-          ? nextCalendarOpacity
-          : slidingCalendarOpacity;
 
     return (
       <View style={[styles.dayPane, { width: pagerWidth }]} key={paneKey}>
-        <Text style={styles.date}>{model.dateLabel}</Text>
+        <Text style={styles.date}>
+          {model.dateLabel.split(" ")[0]}{" "}
+          <Text style={styles.dateWeekday}>{model.dateLabel.split(" ")[1]}</Text>
+        </Text>
 
         <View style={styles.timelineArea}>
           <View
@@ -1243,47 +963,18 @@ export default function App() {
               }
             >
               <View style={styles.timelineTopSpacer} />
-              {renderCalendarPanel(
-                date,
-                isCurrentPane,
-                styles.inlineCalendarLayer,
-                { height: calendarHeight }
-              )}
+              {shouldShowInlineCalendar
+                ? renderCalendarPanel(date, isCurrentPane, styles.inlineCalendarLayer, { height: calendarHeight })
+                : renderCalendarPanel(date, false, [styles.inlineCalendarLayer, { opacity: 0 }], { height: calendarHeight })
+              }
               <View style={styles.timelineRows}>
                 <View style={styles.timelineTrack} />
                 {events.map((event) => (
-                  <View style={styles.eventRow} key={event.time}>
-                    <View style={styles.timeColumn}>
-                      <Text style={styles.time}>{event.time}</Text>
-                    </View>
-                    <View style={styles.markerColumn}>
-                      <View style={[styles.markerDot, styles[`${event.tone}Dot`]]} />
-                    </View>
-                    <View style={[styles.eventCard, styles[`${event.tone}Event`]]}>
-                      <View>
-                        <Text style={styles.eventTitle}>{event.title}</Text>
-                        <Text style={styles.eventMeta}>{event.meta}</Text>
-                      </View>
-                      {event.title === "项目评审" && (
-                        <View style={styles.eventBadge}>
-                          <Bell size={14} color="#1d4ed8" strokeWidth={2.2} />
-                          <Text style={styles.eventBadgeText}>10分钟</Text>
-                        </View>
-                      )}
-                    </View>
-                  </View>
+                  <EventRow key={event.time} event={event} />
                 ))}
               </View>
             </ScrollView>
           </View>
-          {shouldRenderPaneCalendar &&
-            renderCalendarPanel(
-              date,
-              false,
-              [styles.paneCalendarLayer, { opacity: paneCalendarOpacity }],
-              { height: calendarHeight }
-            )}
-
         </View>
       </View>
     );
@@ -1293,15 +984,7 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
       <View style={styles.app}>
-        <View style={styles.topBar}>
-          <View style={styles.topIconPlaceholder} />
-          <Animated.Text style={[styles.screenTitle, { opacity: navigationTitleOpacity }]}>
-            {displayedNavigationTitle}
-          </Animated.Text>
-          <TouchableOpacity style={styles.topIconButton} activeOpacity={0.75}>
-            <Menu size={24} color="#0f172a" strokeWidth={2.2} />
-          </TouchableOpacity>
-        </View>
+        <TopBar title={displayedNavigationTitle} titleOpacity={navigationTitleOpacity} />
 
         <View
           style={styles.dayPage}
@@ -1312,6 +995,13 @@ export default function App() {
           }}
           {...daySwipeResponder.panHandlers}
         >
+          {isCalendarOpen && !crossMonthSwipe &&
+            renderCalendarPanel(
+              fixedCalendarDate,
+              true,
+              styles.fixedCalendarLayer,
+              { height: calendarHeight }
+            )}
           <Animated.View
             style={[
               styles.dayPagerTrack,
@@ -1334,79 +1024,31 @@ export default function App() {
             <Text style={styles.summaryTime}>18:30</Text>
             <Text style={styles.summaryEvent}>晚餐</Text>
             <View style={styles.summarySpacer} />
-            <ChevronRight size={24} color="#94a3b8" strokeWidth={2.1} />
+            <Text style={styles.summaryChevron}>›</Text>
           </TouchableOpacity>
         </View>
 
-        <Animated.View
-          style={[styles.voiceSheet, { transform: [{ translateY: sheetY }] }]}
-        >
-          <View
-            style={styles.sheetHandleHitArea}
-            {...panResponder.panHandlers}
-          >
-            <View style={styles.sheetHandle} />
-          </View>
-          <ScrollView
-            ref={chatScrollRef}
-            style={styles.chatThread}
-            contentContainerStyle={styles.chatContent}
-            alwaysBounceVertical={false}
-            bounces={false}
-            overScrollMode="never"
-            showsVerticalScrollIndicator={false}
-          >
-            {chatMessages.map((message) =>
-              message.role === "user" ? (
-                <View style={styles.userMessageRow} key={message.id}>
-                  <View style={styles.userBubble}>
-                    <Text style={styles.userBubbleText}>{message.text}</Text>
-                  </View>
-                </View>
-              ) : (
-                <View style={styles.assistantMessageRow} key={message.id}>
-                  <View style={styles.assistantAvatar}>
-                    <Check size={15} color="#ffffff" strokeWidth={2.6} />
-                  </View>
-                  <View style={styles.assistantBubble}>
-                    <Text style={styles.assistantBubbleTitle}>{message.title}</Text>
-                    <Text style={styles.assistantBubbleText}>{message.text}</Text>
-                    <Text style={styles.assistantBubbleMeta}>{message.meta}</Text>
-                  </View>
-                </View>
-              )
-            )}
+        <VoiceSheet
+          messages={chatMessages}
+          speechText={voice.speechText}
+          isListening={voice.isListening}
+          chatScrollRef={chatScrollRef}
+          panResponder={panResponder}
+          sheetY={sheetY}
+          showTextInput={voice.showTextInput}
+          textInputValue={voice.textInputValue}
+          onTextInputChange={voice.setTextInputValue}
+          onTextSend={voice.handleSendText}
+        />
 
-            {(isListening || speechText) && (
-              <View style={styles.userMessageRow}>
-                <View style={[styles.userBubble, styles.liveUserBubble]}>
-                  <Text style={styles.userBubbleText}>{speechText || "正在听..."}</Text>
-                </View>
-              </View>
-            )}
-          </ScrollView>
-
-        </Animated.View>
-
-        <Animated.View style={[styles.micButtonWrap, { transform: [{ translateY: micTranslateY }] }]}>
-          {isListening && (
-            <>
-              <Animated.View pointerEvents="none" style={[styles.voicePulseRing, voicePulseAStyle]} />
-              <Animated.View pointerEvents="none" style={[styles.voicePulseRing, styles.voicePulseRingSoft, voicePulseBStyle]} />
-            </>
-          )}
-          <TouchableOpacity style={styles.micButton} activeOpacity={0.86} onPress={handleMicPress}>
-            {isListening ? (
-              <View style={styles.voiceWave}>
-                {voiceBarStyles.map((barStyle, index) => (
-                  <Animated.View key={`voice-bar-${index}`} style={[styles.voiceWaveBar, barStyle]} />
-                ))}
-              </View>
-            ) : (
-              <Mic size={30} color="#ffffff" strokeWidth={2.4} />
-            )}
-          </TouchableOpacity>
-        </Animated.View>
+        <MicButton
+          micTranslateY={micTranslateY}
+          isListening={voice.isListening}
+          onPress={voice.handleMicPress}
+          voiceBarStyles={voiceBarStyles}
+          voicePulseAStyle={voicePulseAStyle}
+          voicePulseBStyle={voicePulseBStyle}
+        />
       </View>
     </SafeAreaView>
   );
@@ -1415,40 +1057,13 @@ export default function App() {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: "#eff6ff"
+    backgroundColor: "#eff6ff",
+    paddingTop: Platform.OS === "android" ? RNStatusBar.currentHeight ?? 24 : 0
   },
   app: {
     flex: 1,
     paddingTop: 12,
     backgroundColor: "#f8fbff"
-  },
-  topBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    minHeight: 40,
-    paddingHorizontal: PAGE_HORIZONTAL_PADDING,
-    marginBottom: 22
-  },
-  topIconButton: {
-    width: 38,
-    height: 38,
-    alignItems: "center",
-    justifyContent: "center"
-  },
-  topIconPlaceholder: {
-    width: 38,
-    height: 38
-  },
-  screenTitle: {
-    position: "absolute",
-    left: 72,
-    right: 72,
-    color: "#0f172a",
-    fontSize: 19,
-    fontWeight: "800",
-    textAlign: "center",
-    letterSpacing: 0
   },
   date: {
     color: "#0f172a",
@@ -1457,6 +1072,11 @@ const styles = StyleSheet.create({
     letterSpacing: 0,
     height: 43,
     marginBottom: 6
+  },
+  dateWeekday: {
+    color: "#64748b",
+    fontSize: 18,
+    fontWeight: "600"
   },
   dayPage: {
     flex: 1,
@@ -1517,14 +1137,11 @@ const styles = StyleSheet.create({
   summarySpacer: {
     flex: 1
   },
-  paneCalendarLayer: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    top: TIMELINE_LIST_HEADROOM,
-    zIndex: 24,
-    elevation: 24,
-    overflow: "hidden"
+  summaryChevron: {
+    color: "#94a3b8",
+    fontSize: 30,
+    lineHeight: 32,
+    fontWeight: "300"
   },
   inlineCalendarLayer: {
     width: "100%",
@@ -1647,253 +1264,13 @@ const styles = StyleSheet.create({
     borderRadius: 1,
     backgroundColor: "#e2e8f0"
   },
-  eventRow: {
-    flexDirection: "row",
-    minHeight: EVENT_ROW_HEIGHT,
-    alignItems: "flex-start"
-  },
-  timeColumn: {
-    width: 58,
-    height: 68,
-    justifyContent: "center",
-    alignItems: "flex-start"
-  },
-  time: {
-    color: "#475569",
-    fontSize: 16,
-    fontWeight: "650",
-    lineHeight: 22
-  },
-  markerColumn: {
-    width: 22,
-    minHeight: EVENT_ROW_HEIGHT,
-    alignItems: "center"
-  },
-  markerDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    marginTop: 28,
-    borderWidth: 2,
-    borderColor: "#f8fbff",
-    zIndex: 2
-  },
-  eventCard: {
-    flex: 1,
-    height: 68,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 0,
-    marginLeft: 14,
-    marginBottom: 24,
-    borderWidth: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between"
-  },
-  softEvent: {
-    backgroundColor: "#eef6ff",
-    borderColor: "#bfdbfe"
-  },
-  lightEvent: {
-    backgroundColor: "#ffffff",
-    borderColor: "#dbeafe"
-  },
-  primaryEvent: {
-    backgroundColor: "#dbeafe",
-    borderColor: "#93c5fd"
-  },
-  warmEvent: {
-    backgroundColor: "#f8fbff",
-    borderColor: "#bfdbfe"
-  },
-  softDot: {
-    backgroundColor: "#3b82f6"
-  },
-  lightDot: {
-    backgroundColor: "#22c55e"
-  },
-  primaryDot: {
-    backgroundColor: "#f97316"
-  },
-  warmDot: {
-    backgroundColor: "#8b5cf6"
-  },
-  eventTitle: {
-    color: "#0f172a",
-    fontSize: 17,
-    fontWeight: "800"
-  },
-  eventMeta: {
-    color: "#64748b",
-    fontSize: 13,
-    marginTop: 5,
-    fontWeight: "500"
-  },
-  eventBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 12,
-    backgroundColor: "#ffffff"
-  },
-  eventBadgeText: {
-    color: "#1d4ed8",
-    fontSize: 12,
-    fontWeight: "800"
-  },
-  voiceSheet: {
+  fixedCalendarLayer: {
     position: "absolute",
-    left: 14,
-    right: 14,
-    bottom: SHEET_BOTTOM,
-    height: SHEET_HEIGHT,
-    paddingTop: 4,
-    paddingHorizontal: 18,
-    paddingBottom: 20,
-    borderRadius: 26,
-    borderWidth: 1,
-    borderColor: "#dbeafe",
-    backgroundColor: "#ffffff",
-    shadowColor: "#0f172a",
-    shadowOpacity: 0.13,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 10
-  },
-  sheetHandleHitArea: {
-    alignSelf: "stretch",
-    height: 28,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 4
-  },
-  sheetHandle: {
-    width: 42,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "#cbd5e1"
-  },
-  chatThread: {
-    flex: 1,
-    paddingTop: 2
-  },
-  chatContent: {
-    gap: 12,
-    paddingBottom: 8
-  },
-  userMessageRow: {
-    flexDirection: "row",
-    justifyContent: "flex-end"
-  },
-  userBubble: {
-    maxWidth: "82%",
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderRadius: 18,
-    borderBottomRightRadius: 6,
-    backgroundColor: "#2563eb"
-  },
-  liveUserBubble: {
-    opacity: 0.86
-  },
-  userBubbleText: {
-    color: "#ffffff",
-    fontSize: 15,
-    lineHeight: 22,
-    fontWeight: "700"
-  },
-  assistantMessageRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 9
-  },
-  assistantAvatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#2563eb"
-  },
-  assistantBubble: {
-    maxWidth: "82%",
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    borderRadius: 18,
-    borderBottomLeftRadius: 6,
-    borderWidth: 1,
-    borderColor: "#bfdbfe",
-    backgroundColor: "#eff6ff"
-  },
-  assistantBubbleTitle: {
-    color: "#1d4ed8",
-    fontSize: 12,
-    fontWeight: "800",
-    marginBottom: 5
-  },
-  assistantBubbleText: {
-    color: "#0f172a",
-    fontSize: 15,
-    lineHeight: 21,
-    fontWeight: "800"
-  },
-  assistantBubbleMeta: {
-    color: "#64748b",
-    fontSize: 13,
-    lineHeight: 19,
-    marginTop: 4,
-    fontWeight: "600"
-  },
-  micButtonWrap: {
-    position: "absolute",
-    alignSelf: "center",
-    bottom: MIC_OPEN_BOTTOM,
-    width: MIC_SIZE,
-    height: MIC_SIZE,
-    borderRadius: MIC_SIZE / 2,
-    shadowColor: "#1d4ed8",
-    shadowOpacity: 0.35,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 12
-  },
-  voicePulseRing: {
-    position: "absolute",
-    left: 0,
-    top: 0,
-    width: MIC_SIZE,
-    height: MIC_SIZE,
-    borderRadius: MIC_SIZE / 2,
-    backgroundColor: "#2563eb"
-  },
-  voicePulseRingSoft: {
-    backgroundColor: "#60a5fa"
-  },
-  micButton: {
-    width: MIC_SIZE,
-    height: MIC_SIZE,
-    borderRadius: 32,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#1d4ed8",
-    zIndex: 2,
-    elevation: 13
-  },
-  voiceWave: {
-    height: 30,
-    minWidth: 34,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 4
-  },
-  voiceWaveBar: {
-    width: 4,
-    height: 26,
-    borderRadius: 2,
-    backgroundColor: "#ffffff"
+    left: PAGE_HORIZONTAL_PADDING,
+    right: PAGE_HORIZONTAL_PADDING,
+    top: DATE_BLOCK_HEIGHT + TIMELINE_LIST_HEADROOM,
+    zIndex: 28,
+    elevation: 28,
+    overflow: "hidden"
   }
 });

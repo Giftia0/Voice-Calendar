@@ -1,7 +1,11 @@
 node_modules/
 .expo/
 dist/
+dist-*/
 web-build/
+.env
+backend/
+frontend/.env
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

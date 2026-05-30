@@ -7,6 +7,25 @@
     "userInterfaceStyle": "light",
     "web": {
       "bundler": "metro"
+    },
+    "plugins": [
+      "expo-sqlite",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "允许 Voice Calendar 使用麦克风录音，用于语音转文字。"
+        }
+      ],
+      "expo-asset"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "72199f38-7b2d-4014-af2c-edc05cece2df"
+      }
+    },
+    "android": {
+      "package": "com.giftia.voicecalendar",
+      "usesCleartextTraffic": true
     }
   }
 }
