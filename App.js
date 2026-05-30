@@ -1,8 +1,9 @@
 import { StatusBar } from "expo-status-bar";
-import { Bell, CalendarDays, Check, ChevronRight, Menu, Mic } from "lucide-react-native";
+import { Bell, Check, ChevronRight, Menu, Mic } from "lucide-react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
+  Easing,
   PanResponder,
   SafeAreaView,
   ScrollView,
@@ -21,8 +22,10 @@ const MIC_GAP = 16;
 const MIC_OPEN_BOTTOM = SHEET_BOTTOM + SHEET_HEIGHT + MIC_GAP;
 const MIC_CLOSED_BOTTOM = 24;
 const MIC_CLOSED_TRANSLATE_Y = MIC_OPEN_BOTTOM - MIC_CLOSED_BOTTOM;
+const PAGE_HORIZONTAL_PADDING = 22;
 const EVENT_ROW_HEIGHT = 92;
 const MARKER_CENTER_Y = 34;
+const DATE_BLOCK_HEIGHT = 49;
 const FLOATING_SUMMARY_HEIGHT = 60;
 const FLOATING_SUMMARY_TOP = 8;
 const FLOATING_SUMMARY_GAP = 22;
@@ -35,6 +38,9 @@ const CALENDAR_PULL_OPEN_THRESHOLD = 92;
 const CALENDAR_PULL_ELASTIC_DISTANCE = 150;
 const CALENDAR_PULL_INITIAL_RESISTANCE = 0.62;
 const CALENDAR_BOTTOM_GAP = 20;
+const DAY_SWIPE_EDGE_RESISTANCE = 0.28;
+const DAY_PREVIEW_WIDTH_RATIO = 0.5;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 const events = [
   { time: "09:00", title: "周会", meta: "团队例会", tone: "soft" },
@@ -50,6 +56,48 @@ const isSameDay = (firstDate, secondDate) =>
   firstDate.getFullYear() === secondDate.getFullYear() &&
   firstDate.getMonth() === secondDate.getMonth() &&
   firstDate.getDate() === secondDate.getDate();
+
+const getDateKey = (date) => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+
+const getMonthKey = (date) => `${date.getFullYear()}-${date.getMonth()}`;
+
+const getCalendarDayIndex = (date) =>
+  Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / DAY_IN_MS);
+
+const formatNavigationTitle = (date, today = new Date()) => {
+  const dayDiff = getCalendarDayIndex(date) - getCalendarDayIndex(today);
+
+  if (Math.abs(dayDiff) <= 7) {
+    if (dayDiff === 0) {
+      return "今天";
+    }
+
+    if (dayDiff === -1) {
+      return "昨天";
+    }
+
+    if (dayDiff === 1) {
+      return "明天";
+    }
+
+    return dayDiff < 0 ? `${Math.abs(dayDiff)}天前` : `${dayDiff}天后`;
+  }
+
+  if (date.getFullYear() !== today.getFullYear()) {
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
+  }
+
+  return `${date.getMonth() + 1}月${date.getDate()}日`;
+};
+
+const getDayStartTime = (date) =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+
+const addDays = (date, amount) => {
+  const nextDate = new Date(date);
+  nextDate.setDate(nextDate.getDate() + amount);
+  return nextDate;
+};
 
 const createCalendarModel = (baseDate) => {
   const year = baseDate.getFullYear();
@@ -70,6 +118,7 @@ const createCalendarModel = (baseDate) => {
       const date = new Date(year, monthIndex, 1 - mondayFirstOffset + index);
       return {
         id: `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`,
+        date,
         day: date.getDate(),
         isCurrentMonth: date.getMonth() === monthIndex,
         isToday: isSameDay(date, baseDate)
@@ -86,11 +135,25 @@ export default function App() {
   const voicePulseA = useRef(new Animated.Value(0)).current;
   const voicePulseB = useRef(new Animated.Value(0)).current;
   const calendarHeight = useRef(new Animated.Value(0)).current;
+  const calendarActiveScale = useRef(new Animated.Value(1)).current;
+  const calendarLeavingScale = useRef(new Animated.Value(0)).current;
+  const calendarLeavingAnimationRun = useRef(0);
+  const navigationTitleOpacity = useRef(new Animated.Value(1)).current;
+  const navigationTitleAnimationRun = useRef(0);
+  const daySlideX = useRef(new Animated.Value(0)).current;
   const dragStartY = useRef(0);
   const timelinePullStartY = useRef(SHEET_CLOSED_Y);
   const timelineEdgeTarget = useRef(null);
   const timelineScrollRef = useRef(null);
   const calendarPanelHeightRef = useRef(0);
+  const dayPageWidth = useRef(0);
+  const isDayTransitioning = useRef(false);
+  const daySwipePreviewDirection = useRef(0);
+  const daySwipeRunId = useRef(0);
+  const pendingDayDirection = useRef(0);
+  const dayTransitionTargetDateRef = useRef(null);
+  const selectedDateRef = useRef(null);
+  const calendarPreviewDateRef = useRef(null);
   const timelineScrollY = useRef(0);
   const timelineViewportHeight = useRef(0);
   const timelineContentHeight = useRef(0);
@@ -102,6 +165,12 @@ export default function App() {
   const [isSheetOpen, setIsSheetOpen] = useState(true);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [calendarPanelHeight, setCalendarPanelHeight] = useState(0);
+  const [dayPageWidthState, setDayPageWidthState] = useState(0);
+  const [dayPagerResetKey, setDayPagerResetKey] = useState(0);
+  const [selectedDate, setSelectedDate] = useState(() => new Date());
+  const [calendarPreviewDate, setCalendarPreviewDate] = useState(null);
+  const [dayTransitionTargetDate, setDayTransitionTargetDate] = useState(null);
+  const [leavingDate, setLeavingDate] = useState(null);
   const [isListening, setIsListening] = useState(false);
   const [speechText, setSpeechText] = useState("");
   const [speechError, setSpeechError] = useState("");
@@ -114,7 +183,62 @@ export default function App() {
       meta: "例如：明天下午三点提醒我开会"
     }
   ]);
-  const calendarModel = useMemo(() => createCalendarModel(new Date()), []);
+  const calendarModel = useMemo(() => createCalendarModel(selectedDate), [selectedDate]);
+  const fixedCalendarDate = calendarPreviewDate || selectedDate;
+  const fixedCalendarKey = getDateKey(fixedCalendarDate);
+  const navigationTitle = useMemo(() => formatNavigationTitle(fixedCalendarDate), [fixedCalendarKey]);
+  const [displayedNavigationTitle, setDisplayedNavigationTitle] = useState(navigationTitle);
+
+  useEffect(() => {
+    if (!selectedDateRef.current) {
+      selectedDateRef.current = selectedDate;
+    }
+  }, []);
+
+  useEffect(() => {
+    selectedDateRef.current = selectedDate;
+  }, [selectedDate]);
+
+  useEffect(() => {
+    calendarPreviewDateRef.current = calendarPreviewDate;
+  }, [calendarPreviewDate]);
+
+  useEffect(() => {
+    if (displayedNavigationTitle === navigationTitle) {
+      return;
+    }
+
+    const runId = navigationTitleAnimationRun.current + 1;
+    navigationTitleAnimationRun.current = runId;
+
+    navigationTitleOpacity.stopAnimation((currentOpacity) => {
+      Animated.timing(navigationTitleOpacity, {
+        toValue: 0,
+        duration: Math.max(40, Math.round(90 * currentOpacity)),
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true
+      }).start(({ finished }) => {
+        if (!finished || runId !== navigationTitleAnimationRun.current) {
+          return;
+        }
+
+        setDisplayedNavigationTitle(navigationTitle);
+
+        requestAnimationFrame(() => {
+          if (runId !== navigationTitleAnimationRun.current) {
+            return;
+          }
+
+          Animated.timing(navigationTitleOpacity, {
+            toValue: 1,
+            duration: 150,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true
+          }).start();
+        });
+      });
+    });
+  }, [displayedNavigationTitle, navigationTitle, navigationTitleOpacity]);
 
   useEffect(() => {
     if (!isListening) {
@@ -189,6 +313,41 @@ export default function App() {
       chatScrollRef.current?.scrollToEnd({ animated: true });
     });
   }, [chatMessages, speechText, isListening]);
+
+  useEffect(() => {
+    calendarActiveScale.stopAnimation();
+    calendarActiveScale.setValue(0.02);
+    Animated.spring(calendarActiveScale, {
+      toValue: 1,
+      useNativeDriver: true,
+      damping: 18,
+      stiffness: 310,
+      mass: 0.72,
+      restDisplacementThreshold: 0.001,
+      restSpeedThreshold: 0.001
+    }).start();
+  }, [fixedCalendarKey, calendarActiveScale]);
+
+  useEffect(() => {
+    if (!leavingDate) {
+      return;
+    }
+
+    const runId = calendarLeavingAnimationRun.current + 1;
+    calendarLeavingAnimationRun.current = runId;
+    calendarLeavingScale.stopAnimation();
+    calendarLeavingScale.setValue(1);
+    Animated.timing(calendarLeavingScale, {
+      toValue: 0,
+      duration: 170,
+      easing: Easing.in(Easing.cubic),
+      useNativeDriver: true
+    }).start(({ finished }) => {
+      if (finished && runId === calendarLeavingAnimationRun.current) {
+        setLeavingDate(null);
+      }
+    });
+  }, [leavingDate, calendarLeavingScale]);
 
   const createMessageId = (prefix) => {
     messageIdRef.current += 1;
@@ -376,6 +535,232 @@ export default function App() {
       calendarHeight.setValue(nextHeight);
     }
   };
+
+  const applyDaySwipeElasticity = (distance, width) => {
+    const sign = Math.sign(distance);
+    const absoluteDistance = Math.abs(distance);
+
+    if (absoluteDistance <= width) {
+      return distance;
+    }
+
+    return sign * (width + (absoluteDistance - width) * DAY_SWIPE_EDGE_RESISTANCE);
+  };
+
+  const getDayPreviewThreshold = (width) => width * DAY_PREVIEW_WIDTH_RATIO;
+
+  const getPagerWidth = () => dayPageWidthState || dayPageWidth.current || 360;
+
+  const resetDayPagerPosition = () => {
+    daySlideX.stopAnimation();
+    daySlideX.setValue(0);
+    requestAnimationFrame(() => {
+      daySlideX.setValue(0);
+    });
+  };
+
+  const hardResetDayPagerPosition = () => {
+    resetDayPagerPosition();
+    setDayPagerResetKey((key) => key + 1);
+  };
+
+  const primeCalendarHighlightAnimation = () => {
+    calendarActiveScale.stopAnimation();
+    calendarActiveScale.setValue(0.02);
+    calendarLeavingScale.stopAnimation();
+    calendarLeavingScale.setValue(1);
+  };
+
+  const startCalendarSwipePreview = (direction, targetDate = null) => {
+    const baseDate = selectedDateRef.current || selectedDate;
+    const fixedDate = calendarPreviewDateRef.current || baseDate;
+    const previewDate = targetDate ? new Date(targetDate) : addDays(baseDate, direction);
+
+    if (
+      daySwipePreviewDirection.current === direction &&
+      calendarPreviewDateRef.current &&
+      isSameDay(calendarPreviewDateRef.current, previewDate)
+    ) {
+      return;
+    }
+
+    daySwipePreviewDirection.current = direction;
+    primeCalendarHighlightAnimation();
+    setLeavingDate(new Date(fixedDate));
+    calendarPreviewDateRef.current = previewDate;
+    setCalendarPreviewDate(previewDate);
+  };
+
+  const resetCalendarSwipePreview = () => {
+    const previewDate = calendarPreviewDateRef.current;
+    if (!previewDate) {
+      daySwipePreviewDirection.current = 0;
+      return;
+    }
+
+    daySwipePreviewDirection.current = 0;
+    primeCalendarHighlightAnimation();
+    setLeavingDate(new Date(previewDate));
+    calendarPreviewDateRef.current = null;
+    setCalendarPreviewDate(null);
+  };
+
+  const settleDaySlideBack = (onComplete) => {
+    Animated.spring(daySlideX, {
+      toValue: 0,
+      useNativeDriver: true,
+      damping: 22,
+      stiffness: 260,
+      mass: 0.9,
+      restDisplacementThreshold: 1,
+      restSpeedThreshold: 1
+    }).start(({ finished }) => {
+      if (finished) {
+        onComplete?.();
+      }
+    });
+  };
+
+  const startDaySlideAnimation = (direction, nextSelectedDate) => {
+    if (isDayTransitioning.current) {
+      return;
+    }
+
+    const width = getPagerWidth();
+    const runId = daySwipeRunId.current + 1;
+    daySwipeRunId.current = runId;
+    isDayTransitioning.current = true;
+    pendingDayDirection.current = direction;
+
+    Animated.timing(daySlideX, {
+      toValue: -direction * width,
+      useNativeDriver: true,
+      duration: 210,
+      easing: Easing.out(Easing.cubic)
+    }).start(({ finished }) => {
+      if (runId !== daySwipeRunId.current) {
+        return;
+      }
+
+      if (!finished) {
+        isDayTransitioning.current = false;
+        return;
+      }
+
+      hardResetDayPagerPosition();
+      selectedDateRef.current = nextSelectedDate;
+      calendarPreviewDateRef.current = null;
+      dayTransitionTargetDateRef.current = null;
+      daySwipePreviewDirection.current = 0;
+      pendingDayDirection.current = 0;
+      isDayTransitioning.current = false;
+      setSelectedDate(nextSelectedDate);
+      setCalendarPreviewDate(null);
+      setDayTransitionTargetDate(null);
+      timelineScrollY.current = 0;
+      timelineScrollRef.current?.scrollTo({ y: 0, animated: false });
+    });
+  };
+
+  const changeDay = (direction, targetDate = null) => {
+    if (isDayTransitioning.current) {
+      return;
+    }
+
+    const baseDate = selectedDateRef.current || selectedDate;
+    const nextSelectedDate = targetDate ? new Date(targetDate) : addDays(baseDate, direction);
+
+    if (isSameDay(baseDate, nextSelectedDate)) {
+      return;
+    }
+
+    if (!targetDate) {
+      startDaySlideAnimation(direction, nextSelectedDate);
+      return;
+    }
+
+    startCalendarSwipePreview(direction, nextSelectedDate);
+    dayTransitionTargetDateRef.current = nextSelectedDate;
+    setDayTransitionTargetDate(nextSelectedDate);
+    requestAnimationFrame(() => {
+      if (
+        dayTransitionTargetDateRef.current &&
+        isSameDay(dayTransitionTargetDateRef.current, nextSelectedDate)
+      ) {
+        startDaySlideAnimation(direction, nextSelectedDate);
+      }
+    });
+  };
+
+  const handleCalendarDayPress = (targetDate) => {
+    const baseDate = selectedDateRef.current || selectedDate;
+    const baseTime = getDayStartTime(baseDate);
+    const targetTime = getDayStartTime(targetDate);
+
+    if (targetTime === baseTime) {
+      return;
+    }
+
+    changeDay(targetTime > baseTime ? 1 : -1, targetDate);
+  };
+
+  const daySwipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponderCapture: (_, gesture) =>
+          Math.abs(gesture.dx) > 18 &&
+          Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.25,
+        onPanResponderGrant: () => {
+          daySwipeRunId.current += 1;
+          daySlideX.stopAnimation();
+          if (isDayTransitioning.current && pendingDayDirection.current) {
+            const nextSelectedDate =
+              dayTransitionTargetDateRef.current ||
+              addDays(selectedDateRef.current || selectedDate, pendingDayDirection.current);
+            selectedDateRef.current = nextSelectedDate;
+            setSelectedDate(nextSelectedDate);
+            calendarPreviewDateRef.current = null;
+            setCalendarPreviewDate(null);
+            dayTransitionTargetDateRef.current = null;
+            setDayTransitionTargetDate(null);
+            pendingDayDirection.current = 0;
+          }
+          isDayTransitioning.current = false;
+          daySwipePreviewDirection.current = 0;
+          daySlideX.setValue(0);
+        },
+        onPanResponderMove: (_, gesture) => {
+          const width = getPagerWidth();
+          const nextX = applyDaySwipeElasticity(gesture.dx, width);
+          const previewThreshold = getDayPreviewThreshold(width);
+          if (
+            Math.abs(gesture.dx) > previewThreshold &&
+            (!daySwipePreviewDirection.current ||
+              Math.sign(gesture.dx) !== -daySwipePreviewDirection.current)
+          ) {
+            startCalendarSwipePreview(gesture.dx < 0 ? 1 : -1);
+          }
+          daySlideX.setValue(Math.max(-width * 1.18, Math.min(width * 1.18, nextX)));
+        },
+        onPanResponderRelease: (_, gesture) => {
+          const width = getPagerWidth();
+          const shouldSwitch = Math.abs(gesture.dx) > width * 0.28 || Math.abs(gesture.vx) > 0.55;
+
+          if (shouldSwitch) {
+            changeDay(gesture.dx < 0 ? 1 : -1);
+            return;
+          }
+
+          settleDaySlideBack();
+          resetCalendarSwipePreview();
+        },
+        onPanResponderTerminate: () => {
+          settleDaySlideBack();
+          resetCalendarSwipePreview();
+        }
+      }),
+    [daySlideX]
+  );
 
   const panResponder = useMemo(
     () =>
@@ -584,84 +969,235 @@ export default function App() {
     outputRange: [-10, 0],
     extrapolate: "clamp"
   });
+  const pagerWidth = getPagerWidth();
+  const calendarActiveTextBaseOpacity = calendarActiveScale.interpolate({
+    inputRange: [0, 0.68, 1],
+    outputRange: [1, 1, 0],
+    extrapolate: "clamp"
+  });
+  const calendarActiveTextWhiteOpacity = calendarActiveScale.interpolate({
+    inputRange: [0, 0.68, 1],
+    outputRange: [0, 0, 1],
+    extrapolate: "clamp"
+  });
+  const leavingDateKey = leavingDate
+    ? getDateKey(leavingDate)
+    : null;
+  const previousDate = useMemo(() => {
+    if (
+      dayTransitionTargetDate &&
+      getDayStartTime(dayTransitionTargetDate) < getDayStartTime(selectedDate)
+    ) {
+      return dayTransitionTargetDate;
+    }
 
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <View style={styles.app}>
-        <View style={styles.topBar}>
-          <TouchableOpacity style={styles.topIconButton} activeOpacity={0.75}>
-            <Menu size={24} color="#0f172a" strokeWidth={2.2} />
-          </TouchableOpacity>
-          <Text style={styles.screenTitle}>今天</Text>
-          <TouchableOpacity style={styles.topIconButton} activeOpacity={0.75}>
-            <CalendarDays size={23} color="#0f172a" strokeWidth={2.2} />
-          </TouchableOpacity>
-        </View>
+    return addDays(selectedDate, -1);
+  }, [selectedDate, dayTransitionTargetDate]);
+  const nextDate = useMemo(() => {
+    if (
+      dayTransitionTargetDate &&
+      getDayStartTime(dayTransitionTargetDate) > getDayStartTime(selectedDate)
+    ) {
+      return dayTransitionTargetDate;
+    }
 
-        <Text style={styles.date}>{calendarModel.dateLabel}</Text>
+    return addDays(selectedDate, 1);
+  }, [selectedDate, dayTransitionTargetDate]);
+  const shouldSlideToPreviousMonth = getMonthKey(selectedDate) !== getMonthKey(previousDate);
+  const shouldSlideToNextMonth = getMonthKey(selectedDate) !== getMonthKey(nextDate);
+  const shouldPrepareSlidingCalendar = shouldSlideToPreviousMonth || shouldSlideToNextMonth;
+  const calendarFadeDistance = Math.max(1, pagerWidth * 0.08);
+  const previousCalendarOpacity = daySlideX.interpolate({
+    inputRange: [0, calendarFadeDistance],
+    outputRange: [0, 1],
+    extrapolate: "clamp"
+  });
+  const nextCalendarOpacity = daySlideX.interpolate({
+    inputRange: [-calendarFadeDistance, 0],
+    outputRange: [1, 0],
+    extrapolate: "clamp"
+  });
+  const slidingCalendarOpacity = shouldSlideToPreviousMonth
+    ? previousCalendarOpacity
+    : nextCalendarOpacity;
+  const fixedCalendarOpacity = shouldPrepareSlidingCalendar
+    ? slidingCalendarOpacity.interpolate({
+        inputRange: [0, 1],
+        outputRange: [1, 0],
+        extrapolate: "clamp"
+      })
+    : 1;
+
+  const renderCalendarDays = (model, isInteractive = true) =>
+    model.days.map((day) => {
+      const isActiveDay = day.isToday;
+      const isLeavingDay = isInteractive && leavingDateKey === day.id && !day.isToday;
+      const DayWrapper = isInteractive ? TouchableOpacity : View;
+      const dayWrapperProps = isInteractive
+        ? {
+            activeOpacity: 0.72,
+            onPress: () => handleCalendarDayPress(day.date)
+          }
+        : {};
+
+      return (
+        <DayWrapper
+          style={styles.calendarDay}
+          key={day.id}
+          {...dayWrapperProps}
+        >
+          {isActiveDay && (
+            <View pointerEvents="none" style={styles.calendarDayActiveSlot}>
+              <Animated.View
+                style={[
+                  styles.calendarDayActiveBg,
+                  { transform: [{ scale: calendarActiveScale }] }
+                ]}
+              />
+            </View>
+          )}
+          {isLeavingDay && (
+            <View pointerEvents="none" style={styles.calendarDayActiveSlot}>
+              <Animated.View
+                style={[
+                  styles.calendarDayActiveBg,
+                  { transform: [{ scale: calendarLeavingScale }] }
+                ]}
+              />
+            </View>
+          )}
+          <View pointerEvents="none" style={styles.calendarDayTextLayer}>
+            {isActiveDay ? (
+              <>
+                <Animated.Text
+                  style={[
+                    styles.calendarDayText,
+                    styles.calendarDayTextAnimated,
+                    styles.calendarDayTextTodayBase,
+                    { opacity: calendarActiveTextBaseOpacity }
+                  ]}
+                >
+                  {day.day}
+                </Animated.Text>
+                <Animated.Text
+                  style={[
+                    styles.calendarDayText,
+                    styles.calendarDayTextAnimated,
+                    styles.calendarDayTextActive,
+                    { opacity: calendarActiveTextWhiteOpacity }
+                  ]}
+                >
+                  {day.day}
+                </Animated.Text>
+              </>
+            ) : (
+              <Text
+                style={[
+                  styles.calendarDayText,
+                  !day.isCurrentMonth && styles.calendarDayMuted,
+                  isLeavingDay && styles.calendarDayTextActive
+                ]}
+              >
+                {day.day}
+              </Text>
+            )}
+          </View>
+        </DayWrapper>
+      );
+    });
+
+  const renderCalendarPanel = (
+    date,
+    isInteractive = false,
+    layerStyle = styles.paneCalendarLayer,
+    shouldMeasure = false
+  ) => {
+    const model = createCalendarModel(date);
+
+    return (
+      <Animated.View
+        pointerEvents={isInteractive ? "auto" : "none"}
+        style={[layerStyle, { height: calendarHeight }]}
+      >
+        <Animated.View
+          style={[styles.calendarPullPanel, { transform: [{ translateY: calendarTranslateY }] }]}
+          onLayout={shouldMeasure ? handleCalendarLayout : undefined}
+        >
+          <View style={styles.calendarPanel}>
+            <View style={styles.weekRow}>
+              {weekDays.map((day) => (
+                <Text style={styles.weekDay} key={day}>
+                  {day}
+                </Text>
+              ))}
+            </View>
+            <View style={styles.calendarGrid}>
+              {renderCalendarDays(model, isInteractive)}
+            </View>
+          </View>
+          <View style={styles.calendarBottomGap} />
+        </Animated.View>
+      </Animated.View>
+    );
+  };
+
+  const renderDayContent = (date, paneKey, isCurrentPane = false) => {
+    const model = isCurrentPane ? calendarModel : createCalendarModel(date);
+    const shouldRenderPaneCalendar =
+      shouldPrepareSlidingCalendar &&
+      (isCurrentPane ||
+        (paneKey === "previous-day" && shouldSlideToPreviousMonth) ||
+        (paneKey === "next-day" && shouldSlideToNextMonth));
+    const paneCalendarOpacity =
+      paneKey === "previous-day"
+        ? previousCalendarOpacity
+        : paneKey === "next-day"
+          ? nextCalendarOpacity
+          : slidingCalendarOpacity;
+
+    return (
+      <View style={[styles.dayPane, { width: pagerWidth }]} key={paneKey}>
+        <Text style={styles.date}>{model.dateLabel}</Text>
 
         <View style={styles.timelineArea}>
           <View style={styles.timelineList}>
             <ScrollView
-              ref={timelineScrollRef}
+              ref={isCurrentPane ? timelineScrollRef : undefined}
               style={styles.timeline}
               contentContainerStyle={styles.timelineContent}
+              scrollEnabled={isCurrentPane}
               alwaysBounceVertical={false}
               bounces={false}
               overScrollMode="never"
               decelerationRate="fast"
               showsVerticalScrollIndicator={false}
               scrollEventThrottle={16}
-              onLayout={(event) => {
-                timelineViewportHeight.current = event.nativeEvent.layout.height;
-              }}
-              onContentSizeChange={(_, height) => {
-                timelineContentHeight.current = height;
-              }}
-              onScroll={(event) => {
-                const offsetY = event.nativeEvent.contentOffset.y;
-                timelineScrollY.current = offsetY;
-              }}
-              {...timelinePullResponder.panHandlers}
+              onLayout={
+                isCurrentPane
+                  ? (event) => {
+                      timelineViewportHeight.current = event.nativeEvent.layout.height;
+                    }
+                  : undefined
+              }
+              onContentSizeChange={
+                isCurrentPane
+                  ? (_, height) => {
+                      timelineContentHeight.current = height;
+                    }
+                  : undefined
+              }
+              onScroll={
+                isCurrentPane
+                  ? (event) => {
+                      const offsetY = event.nativeEvent.contentOffset.y;
+                      timelineScrollY.current = offsetY;
+                    }
+                  : undefined
+              }
+              {...(isCurrentPane ? timelinePullResponder.panHandlers : {})}
             >
               <View style={styles.timelineTopSpacer} />
-              <Animated.View style={[styles.calendarReveal, { height: calendarHeight }]}>
-                <Animated.View
-                  style={[styles.calendarPullPanel, { transform: [{ translateY: calendarTranslateY }] }]}
-                  onLayout={handleCalendarLayout}
-                >
-                  <View style={styles.calendarPanel}>
-                    <View style={styles.weekRow}>
-                      {weekDays.map((day) => (
-                        <Text style={styles.weekDay} key={day}>
-                          {day}
-                        </Text>
-                      ))}
-                    </View>
-                    <View style={styles.calendarGrid}>
-                      {calendarModel.days.map((day) => (
-                        <TouchableOpacity
-                          style={[styles.calendarDay, day.isToday && styles.calendarDayActive]}
-                          activeOpacity={0.78}
-                          key={day.id}
-                        >
-                          <Text
-                            style={[
-                              styles.calendarDayText,
-                              !day.isCurrentMonth && styles.calendarDayMuted,
-                              day.isToday && styles.calendarDayTextActive
-                            ]}
-                          >
-                            {day.day}
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </View>
-                  <View style={styles.calendarBottomGap} />
-                </Animated.View>
-              </Animated.View>
+              <Animated.View style={{ height: calendarHeight }} />
               <View style={styles.timelineRows}>
                 <View style={styles.timelineTrack} />
                 {events.map((event) => (
@@ -689,15 +1225,72 @@ export default function App() {
               </View>
             </ScrollView>
           </View>
+          {shouldRenderPaneCalendar &&
+            renderCalendarPanel(
+              date,
+              false,
+              [styles.paneCalendarLayer, { opacity: paneCalendarOpacity }],
+              isCurrentPane
+            )}
 
-          <TouchableOpacity style={styles.summary} activeOpacity={0.82}>
+        </View>
+      </View>
+    );
+  };
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar style="dark" />
+      <View style={styles.app}>
+        <View style={styles.topBar}>
+          <View style={styles.topIconPlaceholder} />
+          <Animated.Text style={[styles.screenTitle, { opacity: navigationTitleOpacity }]}>
+            {displayedNavigationTitle}
+          </Animated.Text>
+          <TouchableOpacity style={styles.topIconButton} activeOpacity={0.75}>
+            <Menu size={24} color="#0f172a" strokeWidth={2.2} />
+          </TouchableOpacity>
+        </View>
+
+        <View
+          style={styles.dayPage}
+          onLayout={(event) => {
+            const width = event.nativeEvent.layout.width;
+            dayPageWidth.current = width;
+            setDayPageWidthState((currentWidth) => (currentWidth === width ? currentWidth : width));
+          }}
+          {...daySwipeResponder.panHandlers}
+        >
+          <Animated.View
+            key={`day-pager-${dayPagerResetKey}`}
+            style={[
+              styles.dayPagerTrack,
+              {
+                width: pagerWidth * 3,
+                marginLeft: -pagerWidth,
+                transform: [{ translateX: daySlideX }]
+              }
+            ]}
+          >
+            {renderDayContent(previousDate, "previous-day")}
+            {renderDayContent(selectedDate, "current-day", true)}
+            {renderDayContent(nextDate, "next-day")}
+          </Animated.View>
+
+          {renderCalendarPanel(
+            fixedCalendarDate,
+            true,
+            [styles.fixedCalendarLayer, { opacity: fixedCalendarOpacity }],
+            true
+          )}
+
+          <TouchableOpacity style={styles.fixedSummary} activeOpacity={0.82}>
             <Text style={styles.summaryLabel}>下一项</Text>
             <Text style={styles.summaryTime}>18:30</Text>
             <Text style={styles.summaryEvent}>晚餐</Text>
             <View style={styles.summarySpacer} />
             <ChevronRight size={24} color="#94a3b8" strokeWidth={2.1} />
           </TouchableOpacity>
-
         </View>
 
         <Animated.View
@@ -781,7 +1374,6 @@ const styles = StyleSheet.create({
   },
   app: {
     flex: 1,
-    paddingHorizontal: 22,
     paddingTop: 12,
     backgroundColor: "#f8fbff"
   },
@@ -790,6 +1382,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     minHeight: 40,
+    paddingHorizontal: PAGE_HORIZONTAL_PADDING,
     marginBottom: 22
   },
   topIconButton: {
@@ -797,6 +1390,10 @@ const styles = StyleSheet.create({
     height: 38,
     alignItems: "center",
     justifyContent: "center"
+  },
+  topIconPlaceholder: {
+    width: 38,
+    height: 38
   },
   screenTitle: {
     position: "absolute",
@@ -813,18 +1410,31 @@ const styles = StyleSheet.create({
     fontSize: 31,
     fontWeight: "800",
     letterSpacing: 0,
+    height: 43,
     marginBottom: 6
+  },
+  dayPage: {
+    flex: 1,
+    overflow: "hidden"
+  },
+  dayPagerTrack: {
+    flex: 1,
+    flexDirection: "row"
+  },
+  dayPane: {
+    flex: 1,
+    paddingHorizontal: PAGE_HORIZONTAL_PADDING
   },
   timelineArea: {
     flex: 1,
     position: "relative",
     overflow: "visible"
   },
-  summary: {
+  fixedSummary: {
     position: "absolute",
-    left: 0,
-    right: 0,
-    top: FLOATING_SUMMARY_TOP,
+    left: PAGE_HORIZONTAL_PADDING,
+    right: PAGE_HORIZONTAL_PADDING,
+    top: DATE_BLOCK_HEIGHT + FLOATING_SUMMARY_TOP,
     zIndex: 30,
     elevation: 30,
     flexDirection: "row",
@@ -862,9 +1472,23 @@ const styles = StyleSheet.create({
   summarySpacer: {
     flex: 1
   },
-  calendarReveal: {
-    overflow: "hidden",
-    width: "100%"
+  paneCalendarLayer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: TIMELINE_LIST_HEADROOM,
+    zIndex: 24,
+    elevation: 24,
+    overflow: "hidden"
+  },
+  fixedCalendarLayer: {
+    position: "absolute",
+    left: PAGE_HORIZONTAL_PADDING,
+    right: PAGE_HORIZONTAL_PADDING,
+    top: DATE_BLOCK_HEIGHT + TIMELINE_LIST_HEADROOM,
+    zIndex: 24,
+    elevation: 24,
+    overflow: "hidden"
   },
   calendarPullPanel: {
     width: "100%"
@@ -903,14 +1527,42 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center"
   },
-  calendarDayActive: {
+  calendarDayActiveSlot: {
+    position: "absolute",
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1
+  },
+  calendarDayActiveBg: {
+    width: 32,
+    height: 32,
     borderRadius: 16,
     backgroundColor: "#2563eb"
+  },
+  calendarDayTextLayer: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 3,
+    elevation: 3
   },
   calendarDayText: {
     color: "#0f172a",
     fontSize: 14,
+    lineHeight: 18,
     fontWeight: "800"
+  },
+  calendarDayTextAnimated: {
+    position: "absolute"
+  },
+  calendarDayTextTodayBase: {
+    color: "#0f172a"
   },
   calendarDayMuted: {
     color: "#cbd5e1"
