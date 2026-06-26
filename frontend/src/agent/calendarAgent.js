@@ -1,3 +1,5 @@
+import { chatWithTools } from "../llm/client";
+import { buildCalendarSystemPrompt, calendarTools } from "./calendarPrompt";
 import {
   createSchedule as repoCreate,
   querySchedules,
@@ -16,24 +18,6 @@ import {
 import { formatDateTime } from "../types/schedule";
 
 const MAX_STEPS = 6;
-const AGENT_URL = normalizeServiceUrl(process.env.EXPO_PUBLIC_AGENT_URL);
-
-function normalizeServiceUrl(value) {
-  const cleaned = String(value || "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-    .trim()
-    .replace(/\/+$/, "");
-
-  if (!cleaned) {
-    return "";
-  }
-
-  if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(cleaned)) {
-    throw new Error(`EXPO_PUBLIC_AGENT_URL 配置无效：${cleaned}`);
-  }
-
-  return cleaned;
-}
 
 // ─── tool handlers ────────────────────────────────────────────────────────────
 
@@ -170,57 +154,6 @@ async function handleDeleteSchedule(args = {}) {
   };
 }
 
-function parseLocalDateTime(value) {
-  const date = new Date(String(value || "").replace(" ", "T"));
-  if (Number.isNaN(date.getTime())) {
-    throw new Error(`无效时间：${value}`);
-  }
-  return date;
-}
-
-function formatSlotDateTime(date) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-async function handleFindFreeSlots(args = {}) {
-  if (!args.start_time || !args.end_time || !args.duration_minutes) {
-    return {
-      success: false,
-      message: "缺少开始时间、结束时间或时长"
-    };
-  }
-
-  const start = parseLocalDateTime(args.start_time);
-  const end = parseLocalDateTime(args.end_time);
-  const durationMinutes = Number(args.duration_minutes);
-  const stepMinutes = Number(args.step_minutes || 30);
-  const schedules = await querySchedules({
-    start_time: args.start_time,
-    end_time: args.end_time
-  });
-  const slots = [];
-
-  for (const cursor = new Date(start); cursor < end; cursor.setMinutes(cursor.getMinutes() + stepMinutes)) {
-    const slotEnd = new Date(cursor);
-    slotEnd.setMinutes(slotEnd.getMinutes() + durationMinutes);
-    if (slotEnd > end) break;
-
-    const startText = formatSlotDateTime(cursor);
-    const endText = formatSlotDateTime(slotEnd);
-    const hasConflict = schedules.some((schedule) => schedule.start_time < endText && schedule.end_time > startText);
-    if (!hasConflict) {
-      slots.push({ start_time: startText, end_time: endText });
-    }
-  }
-
-  return {
-    success: true,
-    message: slots.length ? `找到 ${slots.length} 个空闲时间段` : "没有找到合适的空闲时间段",
-    slots: slots.slice(0, 10)
-  };
-}
-
 async function executeTool(toolCall) {
   const args = toolCall.arguments || {};
   switch (toolCall.name) {
@@ -232,8 +165,6 @@ async function executeTool(toolCall) {
       return handleUpdateSchedule(args);
     case "delete_schedule":
       return handleDeleteSchedule(args);
-    case "find_free_slots":
-      return handleFindFreeSlots(args);
     case "ask_user":
       return {
         success: true,
@@ -266,48 +197,41 @@ async function executeTool(toolCall) {
  * }>}
  */
 export async function runCalendarAgent({ messages = [], currentDate, timezone } = {}) {
-  if (!AGENT_URL) {
-    throw new Error("EXPO_PUBLIC_AGENT_URL 未配置");
-  }
-
-  const response = await fetch(`${AGENT_URL}/api/agent/run`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      messages,
-      current_date: currentDate || formatDateTime(new Date()),
-      timezone: timezone || "Asia/Shanghai"
-    })
+  const systemPrompt = buildCalendarSystemPrompt({
+    currentDate: currentDate || formatDateTime(new Date()),
+    timezone: timezone || "Asia/Shanghai"
   });
 
-  const text = await response.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new Error(`Agent returned non-JSON: ${text.slice(0, 200)}`);
-  }
+  const fullMessages = [{ role: "system", content: systemPrompt }, ...messages];
+  const response = await chatWithTools(fullMessages, calendarTools, { temperature: 0.1 });
+  const toolCalls = response.toolCalls || [];
+  const assistantMessage = {
+    role: "assistant",
+    content: response.content || "",
+    tool_calls: toolCalls.map((tc) => ({
+      id: tc.id,
+      type: "function",
+      function: {
+        name: tc.name,
+        arguments: JSON.stringify(tc.arguments || {})
+      }
+    }))
+  };
 
-  if (!response.ok) {
-    throw new Error(payload?.detail || payload?.error || `Agent request failed (${response.status})`);
-  }
-
-  const toolCalls = payload.tool_calls || [];
-  const assistantMessage = payload.assistant_message || { role: "assistant", content: payload.reply || "" };
-
-  if (payload.status === "done" || toolCalls.length === 0) {
+  if (toolCalls.length === 0) {
     return {
       status: "done",
-      reply: payload.reply || "",
-      assistant_message: assistantMessage,
+      reply: response.content || "",
+      assistant_message: { role: "assistant", content: response.content || "" },
       tool_calls: []
     };
   }
 
-  if (payload.status === "needs_user_input") {
+  const askUserCall = toolCalls.find((tc) => tc.name === "ask_user");
+  if (askUserCall) {
     return {
       status: "needs_user_input",
-      reply: payload.reply || "",
+      reply: askUserCall.arguments?.question || response.content || "",
       assistant_message: assistantMessage,
       tool_calls: toolCalls
     };
@@ -315,7 +239,7 @@ export async function runCalendarAgent({ messages = [], currentDate, timezone } 
 
   return {
     status: "tool_calls",
-    reply: payload.reply || "",
+    reply: "",
     assistant_message: assistantMessage,
     tool_calls: toolCalls
   };
