@@ -1,117 +1,218 @@
-import { getDatabase } from './database';
+import {
+  addMinutesToDateTime,
+  createSchedule as buildSchedule,
+  getDayRange,
+  normalizeRecurrence,
+  normalizeReminderMinutes
+} from "../types/schedule";
 
-function rowToSchedule(row) {
+function normalizeApiUrl(value) {
+  const cleaned = String(value || "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!cleaned) {
+    return "http://127.0.0.1:8788";
+  }
+
+  if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(cleaned)) {
+    throw new Error(`EXPO_PUBLIC_CALENDAR_API_URL 配置无效：${cleaned}`);
+  }
+
+  return cleaned;
+}
+
+const CALENDAR_API_URL = normalizeApiUrl(
+  process.env.EXPO_PUBLIC_CALENDAR_API_URL || process.env.EXPO_PUBLIC_AGENT_URL
+);
+
+function toSchedule(payload) {
+  if (!payload) return null;
   return {
-    ...row,
-    all_day: Boolean(row.all_day),
-    participants: JSON.parse(row.participants || '[]'),
-    reminders: JSON.parse(row.reminders || '[]'),
+    ...payload,
+    all_day: Boolean(payload.all_day),
+    participants: Array.isArray(payload.participants) ? payload.participants : [],
+    recurrence: normalizeRecurrence(payload.recurrence),
+    reminder_minutes: normalizeReminderMinutes(payload.reminder_minutes)
   };
 }
 
-function scheduleToRow(schedule) {
-  return {
-    ...schedule,
-    all_day: schedule.all_day ? 1 : 0,
-    participants: JSON.stringify(schedule.participants || []),
-    reminders: JSON.stringify(schedule.reminders || []),
-  };
+function buildQuery(params = {}) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      search.set(key, String(value));
+    }
+  });
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
+
+async function requestJson(path, { method = "GET", body } = {}) {
+  const response = await fetch(`${CALENDAR_API_URL}${path}`, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const detail = payload?.detail;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : detail?.message || payload?.message || `Calendar API error (${response.status})`;
+    const error = new Error(message);
+    error.detail = detail || payload;
+    throw error;
+  }
+  return payload;
 }
 
 export async function createSchedule(schedule) {
-  const db = await getDatabase();
-  const row = scheduleToRow(schedule);
-  await db.runAsync(
-    `INSERT INTO schedules (id, title, start_time, end_time, all_day, description, category, participants, location, recurrence, reminders, source, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    row.id, row.title, row.start_time, row.end_time, row.all_day,
-    row.description, row.category, row.participants, row.location,
-    row.recurrence, row.reminders, row.source, row.created_at, row.updated_at
-  );
-  return schedule;
+  const allowConflict = Boolean(schedule.allow_conflict);
+  const payload = { ...schedule };
+  delete payload.allow_conflict;
+  const created = await requestJson(`/api/schedules${buildQuery({ allow_conflict: allowConflict || undefined })}`, {
+    method: "POST",
+    body: payload
+  });
+  return toSchedule(created);
 }
 
 export async function getScheduleById(id) {
-  const db = await getDatabase();
-  const row = await db.getFirstAsync('SELECT * FROM schedules WHERE id = ?', id);
-  return row ? rowToSchedule(row) : null;
+  if (!id) return null;
+  try {
+    return toSchedule(await requestJson(`/api/schedules/${encodeURIComponent(id)}`));
+  } catch (error) {
+    if (String(error?.message || "").includes("not found") || error?.detail) {
+      return null;
+    }
+    throw error;
+  }
 }
 
-export async function querySchedules({ startDate, endDate, category, keyword, participants } = {}) {
-  const db = await getDatabase();
-  const conditions = [];
-  const params = [];
-
-  if (startDate) {
-    conditions.push('end_time >= ?');
-    params.push(startDate);
-  }
-  if (endDate) {
-    conditions.push('start_time <= ?');
-    params.push(endDate);
-  }
-  if (category) {
-    conditions.push('category = ?');
-    params.push(category);
-  }
-  if (keyword) {
-    conditions.push('(title LIKE ? OR description LIKE ? OR location LIKE ?)');
-    const pattern = `%${keyword}%`;
-    params.push(pattern, pattern, pattern);
-  }
-  if (participants && participants.length > 0) {
-    const participantConditions = participants.map(() => 'participants LIKE ?');
-    conditions.push(`(${participantConditions.join(' OR ')})`);
-    participants.forEach((p) => params.push(`%${p}%`));
-  }
-
-  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const rows = await db.getAllAsync(
-    `SELECT * FROM schedules ${where} ORDER BY start_time ASC`,
-    ...params
+export async function querySchedules({
+  start_time,
+  end_time,
+  startDate,
+  endDate,
+  category,
+  keyword,
+  participants
+} = {}) {
+  const rangeStart = start_time || startDate;
+  const rangeEnd = end_time || endDate;
+  const payload = await requestJson(
+    `/api/schedules${buildQuery({
+      start_time: rangeStart,
+      end_time: rangeEnd,
+      category,
+      keyword
+    })}`
   );
-  return rows.map(rowToSchedule);
+  let schedules = (payload?.events || payload || []).map(toSchedule);
+
+  if (participants && participants.length > 0) {
+    schedules = schedules.filter((schedule) =>
+      participants.some((participant) => schedule.participants.some((item) => item.includes(participant)))
+    );
+  }
+
+  return schedules;
 }
 
 export async function updateSchedule(id, updates) {
-  const db = await getDatabase();
-  const existing = await getScheduleById(id);
-  if (!existing) return null;
-
-  const merged = { ...existing, ...updates, updated_at: Date.now() };
-  const row = scheduleToRow(merged);
-  await db.runAsync(
-    `UPDATE schedules SET title=?, start_time=?, end_time=?, all_day=?, description=?, category=?, participants=?, location=?, recurrence=?, reminders=?, source=?, updated_at=? WHERE id=?`,
-    row.title, row.start_time, row.end_time, row.all_day,
-    row.description, row.category, row.participants, row.location,
-    row.recurrence, row.reminders, row.source, row.updated_at, id
-  );
-  return merged;
+  if (!id) return null;
+  try {
+    return toSchedule(
+      await requestJson(`/api/schedules/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: updates
+      })
+    );
+  } catch (error) {
+    if (error?.detail && !error.detail.conflicts) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function deleteSchedule(id) {
-  const db = await getDatabase();
-  await db.runAsync('DELETE FROM schedules WHERE id = ?', id);
+  if (!id) return null;
+  try {
+    return toSchedule(
+      await requestJson(`/api/schedules/${encodeURIComponent(id)}`, {
+        method: "DELETE"
+      })
+    );
+  } catch (error) {
+    if (error?.detail) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function checkConflict(start_time, end_time, excludeId = null) {
-  const db = await getDatabase();
-  if (excludeId) {
-    const rows = await db.getAllAsync(
-      `SELECT * FROM schedules WHERE id != ? AND start_time < ? AND end_time > ?`,
-      excludeId, end_time, start_time
-    );
-    return rows.map(rowToSchedule);
-  }
-  const rows = await db.getAllAsync(
-    `SELECT * FROM schedules WHERE start_time < ? AND end_time > ?`,
-    end_time, start_time
-  );
-  return rows.map(rowToSchedule);
+  const schedules = await querySchedules({ start_time, end_time });
+  return schedules.filter((schedule) => schedule.id !== excludeId);
 }
 
 export async function getSchedulesByDate(date) {
-  const dayStart = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-  return querySchedules({ startDate: dayStart, endDate: dayEnd });
+  const range = getDayRange(date);
+  return querySchedules(range);
+}
+
+export async function seedTestSchedulesForDate(date) {
+  const day = getDayRange(date).start_time.slice(0, 10);
+  const samples = [
+    {
+      id: `test_${day}_standup`,
+      title: "产品站会",
+      start_time: `${day} 09:30`,
+      end_time: `${day} 10:00`,
+      category: "meeting",
+      location: "会议室 A",
+      participants: ["小林", "小陈"],
+      reminder_minutes: 5
+    },
+    {
+      id: `test_${day}_client`,
+      title: "客户沟通",
+      start_time: `${day} 11:00`,
+      end_time: `${day} 12:00`,
+      category: "work",
+      description: "确认下周交付范围",
+      reminder_minutes: 15
+    },
+    {
+      id: `test_${day}_review`,
+      title: "项目评审",
+      start_time: `${day} 15:00`,
+      end_time: `${day} 16:00`,
+      category: "meeting",
+      location: "线上会议",
+      reminder_minutes: 30
+    },
+    {
+      id: `test_${day}_ticket`,
+      title: "抢票提醒",
+      start_time: `${day} 23:00`,
+      end_time: addMinutesToDateTime(`${day} 23:00`, 10),
+      category: "reminder",
+      description: "演唱会开票",
+      reminder_minutes: 5
+    }
+  ];
+
+  for (const sample of samples) {
+    const existing = await getScheduleById(sample.id);
+    if (!existing) {
+      await createSchedule(buildSchedule(sample));
+    }
+  }
 }
