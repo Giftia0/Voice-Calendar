@@ -7,7 +7,7 @@ function normalizeApiUrl(value) {
     .replace(/\/+$/, "");
 
   if (!cleaned) {
-    return "http://127.0.0.1:8788";
+    return "http://127.0.0.1:8787";
   }
 
   if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(cleaned)) {
