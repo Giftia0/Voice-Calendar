@@ -5,27 +5,7 @@ import {
   normalizeRecurrence,
   normalizeReminderMinutes
 } from "../types/schedule";
-
-function normalizeApiUrl(value) {
-  const cleaned = String(value || "")
-    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
-    .trim()
-    .replace(/\/+$/, "");
-
-  if (!cleaned) {
-    return "http://127.0.0.1:8787";
-  }
-
-  if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(cleaned)) {
-    throw new Error(`EXPO_PUBLIC_CALENDAR_API_URL 配置无效：${cleaned}`);
-  }
-
-  return cleaned;
-}
-
-const CALENDAR_API_URL = normalizeApiUrl(
-  process.env.EXPO_PUBLIC_CALENDAR_API_URL || process.env.EXPO_PUBLIC_AGENT_URL
-);
+import { buildQuery, requestJson } from "./client";
 
 function toSchedule(payload) {
   if (!payload) return null;
@@ -36,39 +16,6 @@ function toSchedule(payload) {
     recurrence: normalizeRecurrence(payload.recurrence),
     reminder_minutes: normalizeReminderMinutes(payload.reminder_minutes)
   };
-}
-
-function buildQuery(params = {}) {
-  const search = new URLSearchParams();
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null && value !== "") {
-      search.set(key, String(value));
-    }
-  });
-  const text = search.toString();
-  return text ? `?${text}` : "";
-}
-
-async function requestJson(path, { method = "GET", body } = {}) {
-  const response = await fetch(`${CALENDAR_API_URL}${path}`, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined
-  });
-
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
-  if (!response.ok) {
-    const detail = payload?.detail;
-    const message =
-      typeof detail === "string"
-        ? detail
-        : detail?.message || payload?.message || `Calendar API error (${response.status})`;
-    const error = new Error(message);
-    error.detail = detail || payload;
-    throw error;
-  }
-  return payload;
 }
 
 export async function createSchedule(schedule) {
@@ -87,7 +34,7 @@ export async function getScheduleById(id) {
   try {
     return toSchedule(await requestJson(`/api/schedules/${encodeURIComponent(id)}`));
   } catch (error) {
-    if (String(error?.message || "").includes("not found") || error?.detail) {
+    if (error?.status === 404) {
       return null;
     }
     throw error;
@@ -134,7 +81,7 @@ export async function updateSchedule(id, updates) {
       })
     );
   } catch (error) {
-    if (error?.detail && !error.detail.conflicts) {
+    if (error?.status === 404) {
       return null;
     }
     throw error;
@@ -150,7 +97,7 @@ export async function deleteSchedule(id) {
       })
     );
   } catch (error) {
-    if (error?.detail) {
+    if (error?.status === 404) {
       return null;
     }
     throw error;
