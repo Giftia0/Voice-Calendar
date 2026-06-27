@@ -1,46 +1,34 @@
 # Voice Calendar
 
-Voice Calendar 是一个语音驱动的日程助手实验项目。前端使用 Expo / React Native 构建移动端界面，后端使用 FastAPI + LangChain 负责日程 Agent、数据存储、冲突检测和语音转文字代理。
+Voice Calendar 是一个语音驱动的智能日程助手。你可以用自然语言说出安排，它会理解时间、事项和提醒需求，并把日程保存下来。
 
-当前架构中，App 保留交互和渲染逻辑；日程数据和 Agent 推理都迁移到后端。
+项目包含一个移动端 App 和一个本地后端服务，适合在 Android 真机上调试体验。
 
-## Features
+## 功能
 
-- 语音或文本创建日程
-- 多轮 Agent 对话
-- 日程创建、查询、修改、删除
-- 创建和修改时检测时间冲突
-- 查找空闲时间段
-- 对话窗口内展示日程操作结果卡片
-- DashScope ASR 语音转文字代理
-- OpenAI-compatible Chat API，可接 OpenAI、DeepSeek 或其他兼容服务
+- 用语音或文字添加日程
+- 查看当天日程列表
+- 修改日程标题、时间、地点、参与人、提醒和重复规则
+- 删除日程
+- 自动检测时间冲突
+- 在对话窗口中用卡片展示日程操作结果
+- 支持多轮补充信息，例如时间不明确时继续追问
 
-## Project Structure
+## 使用示例
+
+可以这样输入或说出：
 
 ```text
-voice_calendar/
-  backend/                 FastAPI + LangChain 后端
-    app/
-      agent.py             日程 Agent 和工具注册
-      main.py              API 入口
-      service.py           日程业务逻辑
-      repository.py        本地 JSON 数据存储
-      stt.py               DashScope ASR 代理
-    tests/                 后端测试
-    requirements.txt       Python 依赖
-    .env.example           后端环境变量模板
-
-  frontend/                Expo / React Native App
-    App.js                 主界面和交互流程
-    src/
-      api/                 后端 API 调用
-      components/          UI 组件
-      types/               日程类型和时间工具
-    android/               Android dev client 原生工程
-    .env.example           前端环境变量模板
+明天下午三点提醒我开会
+下周一上午十点和小林讨论项目，提前十五分钟提醒
+帮我看看明天下午有没有空的一小时
+把明天的站会改到上午十点
+删除今晚八点的提醒
 ```
 
-## Backend Setup
+## 本地运行
+
+### 1. 启动后端
 
 ```powershell
 cd backend
@@ -48,142 +36,54 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
-```
-
-编辑 `backend/.env`：
-
-```env
-PORT=8787
-DATA_DIR=./data
-
-OPENAI_API_KEY=
-OPENAI_BASE_URL=
-OPENAI_MODEL=gpt-4o-mini
-
-DASHSCOPE_API_KEY=
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-DASHSCOPE_ASR_MODEL=qwen3-asr-flash
-```
-
-说明：
-
-- `OPENAI_*` 用于日程 Agent，支持 OpenAI-compatible endpoint。
-- `DASHSCOPE_*` 用于语音转文字。
-- 不要提交真实 `.env`，仓库只保留 `.env.example`。
-
-启动后端：
-
-```powershell
 uvicorn app.main:app --host 127.0.0.1 --port 8787 --reload
 ```
 
-健康检查：
+首次运行前，需要在 `backend/.env` 中填写模型和语音识别服务所需的 key。
 
-```powershell
-curl http://127.0.0.1:8787/api/health
-```
-
-## Frontend Setup
+### 2. 启动前端
 
 ```powershell
 cd frontend
 npm install
 copy .env.example .env
-```
-
-编辑 `frontend/.env`：
-
-```env
-EXPO_PUBLIC_BACKEND_URL=http://127.0.0.1:8787
-EXPO_PUBLIC_CALENDAR_API_URL=http://127.0.0.1:8787
-```
-
-启动 Metro：
-
-```powershell
 npx expo start --dev-client
 ```
 
-## Android USB Debugging
+### 3. Android 真机调试
 
-连接手机并确认设备：
+连接手机后执行：
 
 ```powershell
 adb devices
-```
-
-转发 Metro 和后端端口：
-
-```powershell
 adb -s <device-id> reverse tcp:8081 tcp:8081
 adb -s <device-id> reverse tcp:8787 tcp:8787
 ```
 
 然后在手机上打开已安装的 development build。
 
-## Main APIs
+## 配置说明
 
-Agent：
+仓库只提供 `.env.example` 模板。真实 `.env` 文件不会提交到 GitHub。
 
-```http
-POST /api/agent/run
+前端默认连接本机后端：
+
+```env
+EXPO_PUBLIC_BACKEND_URL=http://127.0.0.1:8787
+EXPO_PUBLIC_CALENDAR_API_URL=http://127.0.0.1:8787
 ```
 
-日程：
+后端需要配置：
 
-```http
-GET    /api/schedules
-GET    /api/schedules/{id}
-POST   /api/schedules
-PATCH  /api/schedules/{id}
-DELETE /api/schedules/{id}
+```env
+OPENAI_API_KEY=
+OPENAI_BASE_URL=
+OPENAI_MODEL=
+DASHSCOPE_API_KEY=
 ```
 
-语音转文字：
+如果不配置模型 key，智能日程理解能力会不可用或进入降级模式。
 
-```http
-POST /api/stt/transcribe
-```
+## 安全提醒
 
-## Test
-
-后端：
-
-```powershell
-cd backend
-.\.venv\Scripts\Activate.ps1
-pytest
-python -m compileall app
-```
-
-前端基础语法检查：
-
-```powershell
-cd frontend
-node --check App.js
-node --check src/api/client.js
-node --check src/api/schedules.js
-node --check src/api/calendarAgent.js
-```
-
-## Git Hygiene
-
-应该提交：
-
-- 源码
-- 测试
-- `requirements.txt`
-- `package-lock.json`
-- `.env.example`
-- Android dev client 工程文件
-
-不要提交：
-
-- `.env`
-- `.venv/`
-- `node_modules/`
-- `.expo/`
-- `backend/data/`
-- Android build output
-- release keystore 或任何真实密钥
-
+不要上传任何真实 key、`.env` 文件、构建产物或本地数据文件。
