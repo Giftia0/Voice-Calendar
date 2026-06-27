@@ -21,17 +21,6 @@ const CALENDAR_API_URL = normalizeApiUrl(
   process.env.EXPO_PUBLIC_CALENDAR_API_URL || process.env.EXPO_PUBLIC_AGENT_URL
 );
 
-/**
- * 运行后端 Python LangChain 日历 agent。
- *
- * Python 后端负责：
- * - LangChain 推理
- * - 工具执行
- * - 日程 CRUD
- * - 冲突检测
- *
- * RN 只负责展示返回结果和刷新 UI。
- */
 export async function runCalendarAgent({ messages = [], currentDate, timezone } = {}) {
   const response = await fetch(`${CALENDAR_API_URL}/api/agent/run`, {
     method: "POST",
@@ -64,9 +53,6 @@ export async function runCalendarAgent({ messages = [], currentDate, timezone } 
   };
 }
 
-/**
- * 兼容旧 UI 循环。工具已迁移到 Python 后端执行。
- */
 export async function executeAgentToolCalls() {
   return [];
 }
