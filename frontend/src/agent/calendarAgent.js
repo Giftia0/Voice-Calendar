@@ -17,8 +17,6 @@ import {
 } from "../types/schedule";
 import { formatDateTime } from "../types/schedule";
 
-const MAX_STEPS = 6;
-
 // ─── tool handlers ────────────────────────────────────────────────────────────
 
 function getTodayRange() {
