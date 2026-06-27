@@ -6,9 +6,38 @@ import {
   useAudioRecorder
 } from "expo-audio";
 
-const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+function normalizeBackendUrl(value) {
+  const cleaned = String(value || "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "")
+    .trim()
+    .replace(/\/+$/, "");
+
+  if (!cleaned) {
+    return "";
+  }
+
+  if (!/^https?:\/\/[^\s/]+(?::\d+)?(?:\/[^\s]*)?$/i.test(cleaned)) {
+    throw new Error(`EXPO_PUBLIC_BACKEND_URL 配置无效：${cleaned}`);
+  }
+
+  return cleaned;
+}
+
+const BACKEND_URL = normalizeBackendUrl(process.env.EXPO_PUBLIC_BACKEND_URL);
 const RECORDING_OPTIONS = {
   ...RecordingPresets.HIGH_QUALITY,
+  android: {
+    ...RecordingPresets.HIGH_QUALITY.android,
+    bitRate: 32000,
+    sampleRate: 16000,
+    numberOfChannels: 1
+  },
+  ios: {
+    ...RecordingPresets.HIGH_QUALITY.ios,
+    bitRate: 32000,
+    sampleRate: 16000,
+    numberOfChannels: 1
+  },
   isMeteringEnabled: true
 };
 const SILENCE_METERING_THRESHOLD = -45;
@@ -16,7 +45,7 @@ const SILENCE_AUTO_STOP_MS = 1600;
 const SILENCE_CHECK_INTERVAL_MS = 250;
 const MIN_AUTO_STOP_RECORDING_MS = 900;
 
-export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }) {
+export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef, onRecognizedText }) {
   const audioRecorder = useAudioRecorder(RECORDING_OPTIONS);
   const [isListening, setIsListening] = useState(false);
   const [speechText, setSpeechText] = useState("");
@@ -29,6 +58,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
   const silenceCheckTimerRef = useRef(null);
   const silentSinceRef = useRef(null);
   const hasDetectedSpeechRef = useRef(false);
+  const hasMeteringSampleRef = useRef(false);
   const recordingStartedAtRef = useRef(0);
   const isStoppingRef = useRef(false);
   const requestAbortControllerRef = useRef(null);
@@ -41,6 +71,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
     }
     silentSinceRef.current = null;
     hasDetectedSpeechRef.current = false;
+    hasMeteringSampleRef.current = false;
   }, []);
 
   useEffect(
@@ -75,7 +106,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
     [setChatMessages, createMessageId]
   );
 
-  const appendRecognizedConversation = useCallback(
+  const appendUserMessage = useCallback(
     (text) => {
       setChatMessages((messages) => [
         ...messages,
@@ -83,7 +114,23 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
           id: createMessageId("user"),
           role: "user",
           text
-        },
+        }
+      ]);
+    },
+    [setChatMessages, createMessageId]
+  );
+
+  const appendRecognizedConversation = useCallback(
+    async (text) => {
+      appendUserMessage(text);
+
+      if (onRecognizedText) {
+        await onRecognizedText(text);
+        return;
+      }
+
+      setChatMessages((messages) => [
+        ...messages,
         {
           id: createMessageId("assistant"),
           role: "assistant",
@@ -93,7 +140,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
         }
       ]);
     },
-    [setChatMessages, createMessageId]
+    [appendUserMessage, onRecognizedText, setChatMessages, createMessageId]
   );
 
   const transcribeAudio = useCallback(
@@ -141,25 +188,36 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
 
     isStoppingRef.current = true;
     isCancellingRef.current = false;
+    const hadMeteringSample = hasMeteringSampleRef.current;
+    const hadDetectedSpeech = hasDetectedSpeechRef.current;
     stopSilenceDetection();
 
     try {
       await audioRecorder.stop();
       const uri = audioRecorder.uri;
       setIsListening(false);
-      setSpeechText("正在识别...");
 
       if (!uri) {
         throw new Error("录音文件生成失败");
       }
 
+      if (hadMeteringSample && !hadDetectedSpeech) {
+        appendAssistantMessage({
+          title: "识别提示",
+          text: "没有识别到有效语音",
+          meta: "请靠近麦克风后重试"
+        });
+        return;
+      }
+
+      setSpeechText("正在识别...");
       const transcript = await transcribeAudio(uri);
       if (isCancellingRef.current) {
         return;
       }
 
       if (transcript) {
-        appendRecognizedConversation(transcript);
+        await appendRecognizedConversation(transcript);
       } else {
         appendAssistantMessage({
           title: "识别提示",
@@ -198,6 +256,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
     stopSilenceDetection();
     silentSinceRef.current = null;
     hasDetectedSpeechRef.current = false;
+    hasMeteringSampleRef.current = false;
     recordingStartedAtRef.current = Date.now();
 
     silenceCheckTimerRef.current = setInterval(() => {
@@ -211,6 +270,7 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
         return;
       }
 
+      hasMeteringSampleRef.current = true;
       const now = Date.now();
       const hasVoice = metering > SILENCE_METERING_THRESHOLD;
       if (hasVoice) {
@@ -307,13 +367,21 @@ export function useVoiceInput({ chatMessages, setChatMessages, animateSheetRef }
     isStoppingRef.current = false;
   }, [audioRecorder, stopSilenceDetection]);
 
-  const handleSendText = useCallback(() => {
+  const handleSendText = useCallback(async () => {
     const text = textInputValue.trim();
     if (!text) return;
-    appendRecognizedConversation(text);
     setTextInputValue("");
-    setShowTextInput(false);
-  }, [textInputValue, appendRecognizedConversation]);
+
+    try {
+      await appendRecognizedConversation(text);
+    } catch (error) {
+      appendAssistantMessage({
+        title: "助手回复",
+        text: error?.message || "Agent 调用失败",
+        meta: "请检查后端服务和模型接口"
+      });
+    }
+  }, [textInputValue, appendRecognizedConversation, appendAssistantMessage]);
 
   return {
     isListening,

@@ -26,5 +26,11 @@ allprojects {
   }
 }
 
+// Local debug fallback for the Android SDK installed on this machine.
+// Remove these overrides after installing Android SDK Platform 36 and Build Tools 36.0.0.
+ext.buildToolsVersion = "35.0.0"
+ext.compileSdkVersion = 35
+ext.targetSdkVersion = 35
+
 apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"

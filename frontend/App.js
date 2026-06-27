@@ -10,6 +10,7 @@ import {
   StatusBar as RNStatusBar,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View
 } from "react-native";
@@ -30,6 +31,22 @@ import {
 import { weekDays, fullWeekDays } from "./src/components/calendarConstants";
 import * as C from "./src/components/constants";
 import { useVoiceInput } from "./src/components/useVoiceInput";
+import { runCalendarAgent, executeAgentToolCalls } from "./src/api/calendarAgent";
+import {
+  getScheduleById,
+  getSchedulesByDate,
+  seedTestSchedulesForDate,
+  updateSchedule as repoUpdateSchedule
+} from "./src/api/schedules";
+import {
+  CATEGORIES,
+  WEEKDAYS,
+  REMINDER_OPTIONS,
+  formatDateTime,
+  parseDateTime,
+  normalizeRecurrence,
+  normalizeReminderMinutes
+} from "./src/types/schedule";
 
 const SHEET_CLOSED_Y = C.SHEET_CLOSED_Y;
 const MIC_CLOSED_TRANSLATE_Y = C.MIC_CLOSED_TRANSLATE_Y;
@@ -54,15 +71,155 @@ const DAY_SWIPE_EDGE_RESISTANCE = C.DAY_SWIPE_EDGE_RESISTANCE;
 const DAY_PREVIEW_WIDTH_RATIO = C.DAY_PREVIEW_WIDTH_RATIO;
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
-const events = [
+const categoryTones = {
+  work: "soft",
+  personal: "warm",
+  meeting: "primary",
+  reminder: "light",
+  travel: "soft"
+};
 
-  { time: "09:00", title: "周会", meta: "团队例会", tone: "soft" },
-  { time: "11:30", title: "牙医", meta: "提前30分钟提醒", tone: "light" },
-  { time: "15:00", title: "项目评审", meta: "会议室 A", tone: "primary" },
-  { time: "18:30", title: "晚餐", meta: "家庭安排", tone: "warm" },
-];
+const createChatId = (prefix) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
+const getTimeText = (dateTime) => String(dateTime || "").slice(11, 16) || "--:--";
 
+const reminderLabels = {
+  0: "准时",
+  5: "5分钟前",
+  15: "15分钟前",
+  30: "30分钟前",
+  60: "1小时前",
+  120: "2小时前",
+  1440: "1天前",
+  2880: "2天前",
+  4320: "3天前",
+  10080: "1周前"
+};
+
+const categoryLabels = {
+  work: "工作",
+  personal: "个人",
+  meeting: "会议",
+  reminder: "提醒",
+  travel: "出行"
+};
+
+const recurrenceLabels = {
+  none: "不重复",
+  daily: "每天",
+  weekly: "每周",
+  monthly: "每月",
+  yearly: "每年"
+};
+
+const weekdayLabels = {
+  monday: "周一",
+  tuesday: "周二",
+  wednesday: "周三",
+  thursday: "周四",
+  friday: "周五",
+  saturday: "周六",
+  sunday: "周日"
+};
+
+const minuteOptions = Array.from({ length: 12 }, (_, index) => index * 5);
+
+function getDateOnlyKey(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatPickerDateLabel(date) {
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${fullWeekDays[date.getDay()]}`;
+}
+
+const scheduleToEvent = (schedule) => ({
+  id: schedule.id,
+  time: getTimeText(schedule.start_time),
+  title: schedule.title || "未命名日程",
+  meta: schedule.location || schedule.description || "",
+  tone: categoryTones[schedule.category] || "soft",
+  reminderMinutes: schedule.reminder_minutes
+});
+
+const operationLabels = {
+  create_schedule: "已创建日程",
+  update_schedule: "已更新日程",
+  delete_schedule: "已删除日程"
+};
+
+const operationTones = {
+  create_schedule: "success",
+  update_schedule: "info",
+  delete_schedule: "danger"
+};
+
+function formatEventResultTime(event) {
+  if (!event?.start_time) return "";
+  const start = String(event.start_time);
+  const end = String(event.end_time || "");
+  const date = start.slice(5, 10).replace("-", "月");
+  const startTime = start.slice(11, 16);
+  const endTime = end.slice(11, 16);
+  return endTime ? `${date}日 ${startTime}-${endTime}` : `${date}日 ${startTime}`;
+}
+
+const requestedActionLabels = {
+  create_schedule: "拟创建",
+  update_schedule: "拟修改"
+};
+
+function toEventResultItem(event) {
+  if (!event) return null;
+  return {
+    title: event.title || "未命名日程",
+    time: formatEventResultTime(event),
+    location: event.location || "",
+    description: event.description || ""
+  };
+}
+
+function buildEventResultMessages(result) {
+  const traces = Array.isArray(result?.trace) ? result.trace : [];
+  return traces
+    .filter((trace) => trace?.type === "tool" && operationLabels[trace.name])
+    .map((trace) => {
+      const toolResult = trace.result || {};
+      const conflicts = Array.isArray(toolResult.conflicts) ? toolResult.conflicts : [];
+      const event = toolResult.event || toolResult.draft || null;
+      const requested = toEventResultItem(event);
+
+      if (toolResult.success === false && conflicts.length > 0) {
+        return {
+          id: createChatId(`event-conflict-${trace.name}`),
+          role: "assistant",
+          variant: "event_result",
+          resultType: "conflict",
+          operation: "时间冲突",
+          tone: "warning",
+          title: "这个时间段已有安排",
+          meta: toolResult.message || "该时间段与已有日程冲突",
+          requestedLabel: requestedActionLabels[trace.name] || "请求日程",
+          requested,
+          conflicts: conflicts.map(toEventResultItem).filter(Boolean)
+        };
+      }
+
+      return {
+        id: createChatId(`event-${trace.name}`),
+        role: "assistant",
+        variant: "event_result",
+        resultType: "operation",
+        operation: operationLabels[trace.name],
+        tone: toolResult.success === false ? "warning" : operationTones[trace.name],
+        title: requested?.title || toolResult.message || operationLabels[trace.name],
+        time: requested?.time || "",
+        location: requested?.location || "",
+        description: requested?.description || "",
+        meta: toolResult.message || "",
+        conflicts: []
+      };
+    });
+}
 
 export default function App() {
   const sheetY = useRef(new Animated.Value(0)).current;
@@ -95,6 +252,7 @@ export default function App() {
   const timelineViewportHeight = useRef(0);
   const timelineContentHeight = useRef(0);
   const chatScrollRef = useRef(null);
+  const hasSeededTestSchedulesRef = useRef(false);
   const [isSheetOpen, setIsSheetOpen] = useState(true);
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const isCalendarOpenRef = useRef(false);
@@ -105,6 +263,12 @@ export default function App() {
   const [dayTransitionTargetDate, setDayTransitionTargetDate] = useState(null);
   const [leavingDate, setLeavingDate] = useState(null);
   const [crossMonthSwipe, setCrossMonthSwipe] = useState(false);
+  const [schedulesByDate, setSchedulesByDate] = useState({});
+  const [detailSchedule, setDetailSchedule] = useState(null);
+  const [detailForm, setDetailForm] = useState(null);
+  const [detailError, setDetailError] = useState("");
+  const [isSavingDetail, setIsSavingDetail] = useState(false);
+  const [detailPickerTarget, setDetailPickerTarget] = useState(null);
   const [chatMessages, setChatMessages] = useState([
     {
       id: "assistant-welcome",
@@ -121,7 +285,288 @@ export default function App() {
   const [displayedNavigationTitle, setDisplayedNavigationTitle] = useState(navigationTitle);
 
   const animateSheetRef = useRef(null);
-  const voice = useVoiceInput({ chatMessages, setChatMessages, animateSheetRef });
+  const agentMessagesRef = useRef([]);
+
+  const loadVisibleSchedules = useCallback(
+    async (date) => {
+      const dates = [addDays(date, -1), date, addDays(date, 1)];
+      const results = await Promise.all(
+        dates.map(async (targetDate) => ({
+          dateKey: getDateKey(targetDate),
+          schedules: await getSchedulesByDate(targetDate)
+        }))
+      );
+      setSchedulesByDate((current) => ({
+        ...current,
+        ...Object.fromEntries(results.map((result) => [result.dateKey, result.schedules]))
+      }));
+    },
+    []
+  );
+
+  const appendAssistantChatMessage = useCallback((text, meta = "") => {
+    setChatMessages((messages) => [
+      ...messages,
+      {
+        id: createChatId("assistant"),
+        role: "assistant",
+        title: "助手回复",
+        text,
+        meta
+      }
+    ]);
+  }, []);
+
+  const appendChatMessages = useCallback((nextMessages) => {
+    if (!nextMessages.length) return;
+    setChatMessages((messages) => [...messages, ...nextMessages]);
+  }, []);
+
+  const createDetailForm = useCallback((schedule) => ({
+    title: schedule?.title || "",
+    start_time: schedule?.start_time || "",
+    end_time: schedule?.end_time || "",
+    all_day: Boolean(schedule?.all_day),
+    location: schedule?.location || "",
+    description: schedule?.description || "",
+    category: schedule?.category || "personal",
+    participants_text: Array.isArray(schedule?.participants) ? schedule.participants.join("，") : "",
+    recurrence: normalizeRecurrence(schedule?.recurrence),
+    reminder_minutes: normalizeReminderMinutes(schedule?.reminder_minutes)
+  }), []);
+
+  const openScheduleDetail = useCallback(async (scheduleId) => {
+    if (!scheduleId) {
+      return;
+    }
+
+    const schedule = await getScheduleById(scheduleId);
+    if (!schedule) {
+      appendAssistantChatMessage("没有找到这个日程，可能已经被删除。", "本地日历");
+      return;
+    }
+
+    setDetailError("");
+    setDetailSchedule(schedule);
+    setDetailForm(createDetailForm(schedule));
+    setDetailPickerTarget(null);
+    animateSheetRef.current?.(SHEET_CLOSED_Y, false);
+  }, [appendAssistantChatMessage, createDetailForm]);
+
+  const closeScheduleDetail = useCallback(() => {
+    setDetailSchedule(null);
+    setDetailForm(null);
+    setDetailError("");
+    setIsSavingDetail(false);
+    setDetailPickerTarget(null);
+  }, []);
+
+  const updateDetailField = useCallback((field, value) => {
+    setDetailForm((current) => ({
+      ...current,
+      [field]: value
+    }));
+  }, []);
+
+  const updateDetailDateTime = useCallback((field, updater) => {
+    setDetailForm((current) => {
+      if (!current) return current;
+      const baseDate =
+        parseDateTime(current[field]) ||
+        parseDateTime(current.start_time) ||
+        selectedDateRef.current ||
+        new Date();
+      const nextDate = updater(new Date(baseDate));
+      return {
+        ...current,
+        [field]: formatDateTime(nextDate)
+      };
+    });
+  }, []);
+
+  const updateDetailRecurrence = useCallback((updates) => {
+    setDetailForm((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        recurrence: normalizeRecurrence({
+          ...current.recurrence,
+          ...updates
+        })
+      };
+    });
+  }, []);
+
+  const toggleDetailWeekday = useCallback((weekday) => {
+    setDetailForm((current) => {
+      if (!current) return current;
+      const recurrence = normalizeRecurrence(current.recurrence);
+      const weekdays = recurrence.weekdays.includes(weekday)
+        ? recurrence.weekdays.filter((item) => item !== weekday)
+        : [...recurrence.weekdays, weekday];
+      return {
+        ...current,
+        recurrence: {
+          ...recurrence,
+          weekdays
+        }
+      };
+    });
+  }, []);
+
+  const saveScheduleDetail = useCallback(async () => {
+    if (!detailSchedule || !detailForm || isSavingDetail) {
+      return;
+    }
+
+    const title = detailForm.title.trim();
+    const startTime = detailForm.start_time.trim();
+    const endTime = detailForm.end_time.trim();
+
+    if (!title) {
+      setDetailError("标题不能为空");
+      return;
+    }
+    if (!parseDateTime(startTime) || !parseDateTime(endTime)) {
+      setDetailError("时间格式必须是 YYYY-MM-DD HH:mm");
+      return;
+    }
+    if (startTime > endTime) {
+      setDetailError("结束时间不能早于开始时间");
+      return;
+    }
+
+    const participants = detailForm.participants_text
+      .split(/[,，、\s]+/)
+      .map((participant) => participant.trim())
+      .filter(Boolean);
+
+    setIsSavingDetail(true);
+    setDetailError("");
+    try {
+      const updated = await repoUpdateSchedule(detailSchedule.id, {
+        title,
+        start_time: startTime,
+        end_time: endTime,
+        all_day: Boolean(detailForm.all_day),
+        location: detailForm.location.trim(),
+        description: detailForm.description.trim(),
+        category: detailForm.category,
+        participants,
+        recurrence: normalizeRecurrence(detailForm.recurrence),
+        reminder_minutes: normalizeReminderMinutes(detailForm.reminder_minutes)
+      });
+
+      if (!updated) {
+        setDetailError("日程不存在，可能已经被删除");
+        return;
+      }
+
+      const nextDate = parseDateTime(updated?.start_time || startTime) || selectedDateRef.current || selectedDate;
+      setSelectedDate(nextDate);
+      await loadVisibleSchedules(nextDate);
+      setDetailSchedule(updated);
+      setDetailForm(createDetailForm(updated));
+      appendAssistantChatMessage("日程已更新。", "本地日历");
+    } catch (error) {
+      setDetailError(error?.message || "保存失败");
+    } finally {
+      setIsSavingDetail(false);
+    }
+  }, [
+    appendAssistantChatMessage,
+    createDetailForm,
+    detailForm,
+    detailSchedule,
+    isSavingDetail,
+    loadVisibleSchedules,
+    selectedDate
+  ]);
+
+  const runAgentForText = useCallback(
+    async (text) => {
+      try {
+        let messages = [
+          ...agentMessagesRef.current,
+          {
+            role: "user",
+            content: text
+          }
+        ];
+
+        for (let step = 0; step < 4; step += 1) {
+          const result = await runCalendarAgent({
+            messages,
+            currentDate: formatDateTime(new Date()),
+            timezone: "Asia/Shanghai"
+          });
+
+          if (result.assistant_message) {
+            messages = [...messages, result.assistant_message];
+          }
+
+          if (result.status === "done") {
+            agentMessagesRef.current = messages;
+            appendAssistantChatMessage(result.reply || "已完成。");
+            appendChatMessages(buildEventResultMessages(result));
+            await loadVisibleSchedules(selectedDateRef.current || selectedDate);
+            return;
+          }
+
+          if (result.status === "needs_user_input") {
+            const toolResults = await executeAgentToolCalls(result.tool_calls || []);
+            messages = [...messages, ...toolResults];
+
+            agentMessagesRef.current = messages;
+            appendAssistantChatMessage(result.reply || "我需要再确认一下。", "等待补充信息");
+            appendChatMessages(buildEventResultMessages(result));
+            return;
+          }
+
+          if (result.status === "tool_calls") {
+            const toolResults = await executeAgentToolCalls(result.tool_calls || []);
+            messages = [...messages, ...toolResults];
+            appendChatMessages(buildEventResultMessages(result));
+            await loadVisibleSchedules(selectedDateRef.current || selectedDate);
+            continue;
+          }
+        }
+
+        agentMessagesRef.current = messages;
+        appendAssistantChatMessage("这个操作有点复杂，我先停在这里。", "工具循环已停止");
+      } catch (error) {
+        appendAssistantChatMessage(error?.message || "Agent 调用失败", "请检查后端服务和模型接口");
+      }
+    },
+    [appendAssistantChatMessage, appendChatMessages, loadVisibleSchedules, selectedDate]
+  );
+
+  const voice = useVoiceInput({
+    chatMessages,
+    setChatMessages,
+    animateSheetRef,
+    onRecognizedText: runAgentForText
+  });
+  const getEventsForDate = useCallback((date) => {
+    const source = (schedulesByDate[getDateKey(date)] || [])
+      .filter((schedule) => schedule && schedule.start_time)
+      .map(scheduleToEvent);
+    return [...source].sort((a, b) => a.time.localeCompare(b.time));
+  }, [schedulesByDate]);
+  const currentEvents = useMemo(() => getEventsForDate(selectedDate), [getEventsForDate, selectedDate]);
+  const nextEvent = currentEvents[0];
+
+  useEffect(() => {
+    (async () => {
+      if (!hasSeededTestSchedulesRef.current) {
+        hasSeededTestSchedulesRef.current = true;
+        await seedTestSchedulesForDate(selectedDate);
+      }
+      await loadVisibleSchedules(selectedDate);
+    })().catch((error) => {
+      console.warn("[calendar] failed to prepare schedules", error);
+    });
+  }, [selectedDate, loadVisibleSchedules]);
 
   const animateSheet = useCallback((toValue, open) => {
     setIsSheetOpen(open);
@@ -328,7 +773,12 @@ export default function App() {
     }
 
     daySwipePreviewDirection.current = direction;
-    setCrossMonthSwipe(isCrossMonthPreview);
+    if (!isCrossMonthPreview) {
+      setCrossMonthSwipe(false);
+      return;
+    }
+
+    setCrossMonthSwipe(true);
     primeCalendarHighlightAnimation();
     setLeavingDate(new Date(fixedDate));
     calendarPreviewDateRef.current = previewDate;
@@ -392,6 +842,8 @@ export default function App() {
         return;
       }
 
+      daySlideX.stopAnimation();
+      daySlideX.setValue(0);
       selectedDateRef.current = nextSelectedDate;
       calendarPreviewDateRef.current = null;
       dayTransitionTargetDateRef.current = null;
@@ -402,7 +854,6 @@ export default function App() {
       setSelectedDate(nextSelectedDate);
       setCalendarPreviewDate(null);
       setDayTransitionTargetDate(null);
-      requestAnimationFrame(resetDayPagerPosition);
       timelineScrollY.current = 0;
       timelineScrollRef.current?.scrollTo({ y: 0, animated: false });
     });
@@ -464,6 +915,7 @@ export default function App() {
             const nextSelectedDate =
               dayTransitionTargetDateRef.current ||
               addDays(selectedDateRef.current || selectedDate, pendingDayDirection.current);
+            daySlideX.setValue(0);
             selectedDateRef.current = nextSelectedDate;
             setSelectedDate(nextSelectedDate);
             calendarPreviewDateRef.current = null;
@@ -593,6 +1045,9 @@ export default function App() {
         },
         onPanResponderGrant: () => {
           if (timelineEdgeTarget.current === "calendar-open" || timelineEdgeTarget.current === "calendar-close") {
+            if (timelineEdgeTarget.current === "calendar-open") {
+              setIsCalendarOpen(true);
+            }
             calendarHeight.stopAnimation();
             return;
           }
@@ -605,6 +1060,9 @@ export default function App() {
         },
         onPanResponderMove: (_, gesture) => {
           if (timelineEdgeTarget.current === "calendar-open") {
+            if (!isCalendarOpen) {
+              setIsCalendarOpen(true);
+            }
             const pullDistance = Math.max(0, gesture.dy);
             const panelHeight = getCalendarPanelHeight();
             const nextHeight = Math.min(panelHeight, applyCalendarPullElasticity(pullDistance));
@@ -912,6 +1370,7 @@ export default function App() {
 
   const renderDayContent = (date, paneKey, isCurrentPane = false) => {
     const model = isCurrentPane ? calendarModel : createCalendarModel(date);
+    const paneEvents = getEventsForDate(date);
     const shouldShowInlineCalendar =
       isCalendarOpen &&
       crossMonthSwipe &&
@@ -920,7 +1379,13 @@ export default function App() {
         (paneKey === "next-day" && shouldSlideToNextMonth));
 
     return (
-      <View style={[styles.dayPane, { width: pagerWidth }]} key={paneKey}>
+      <View
+        collapsable={false}
+        renderToHardwareTextureAndroid
+        shouldRasterizeIOS
+        style={[styles.dayPane, { width: pagerWidth }]}
+        key={paneKey}
+      >
         <Text style={styles.date}>
           {model.dateLabel.split(" ")[0]}{" "}
           <Text style={styles.dateWeekday}>{model.dateLabel.split(" ")[1]}</Text>
@@ -968,9 +1433,24 @@ export default function App() {
                 : renderCalendarPanel(date, false, [styles.inlineCalendarLayer, { opacity: 0 }], { height: calendarHeight })
               }
               <View style={styles.timelineRows}>
-                <View style={styles.timelineTrack} />
-                {events.map((event) => (
-                  <EventRow key={event.time} event={event} />
+                <View
+                  style={[
+                    styles.timelineTrack,
+                    { height: EVENT_ROW_HEIGHT * (Math.max(paneEvents.length, 1) - 1) }
+                  ]}
+                />
+                {paneEvents.length === 0 && (
+                  <View style={styles.emptyTimeline}>
+                    <Text style={styles.emptyTimelineTitle}>暂无日程</Text>
+                    <Text style={styles.emptyTimelineMeta}>可以用语音添加一个新的安排</Text>
+                  </View>
+                )}
+                {paneEvents.map((event) => (
+                  <EventRow
+                    key={event.id || `${event.time}-${event.title}`}
+                    event={event}
+                    onPress={() => openScheduleDetail(event.id)}
+                  />
                 ))}
               </View>
             </ScrollView>
@@ -980,10 +1460,329 @@ export default function App() {
     );
   };
 
+  const renderDateTimePicker = () => {
+    if (!detailForm || !detailPickerTarget) return null;
+
+    const currentDate =
+      parseDateTime(detailForm[detailPickerTarget]) ||
+      parseDateTime(detailForm.start_time) ||
+      selectedDateRef.current ||
+      new Date();
+    const dateOptions = Array.from({ length: 91 }, (_, index) => addDays(currentDate, index - 45));
+    const selectedDateKey = getDateOnlyKey(currentDate);
+    const selectedHour = currentDate.getHours();
+    const selectedMinute = currentDate.getMinutes();
+
+    return (
+      <View style={styles.detailPickerPanel}>
+        <View style={styles.detailPickerHeader}>
+          <Text style={styles.detailPickerTitle}>
+            选择{detailPickerTarget === "start_time" ? "开始时间" : "结束时间"}
+          </Text>
+          <TouchableOpacity onPress={() => setDetailPickerTarget(null)} activeOpacity={0.72}>
+            <Text style={styles.detailPickerDone}>完成</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.detailPickerColumns}>
+          <ScrollView style={styles.detailPickerDateColumn} showsVerticalScrollIndicator={false}>
+            {dateOptions.map((date) => {
+              const active = getDateOnlyKey(date) === selectedDateKey;
+              return (
+                <TouchableOpacity
+                  key={getDateOnlyKey(date)}
+                  style={[styles.detailPickerOption, active && styles.detailPickerOptionActive]}
+                  activeOpacity={0.72}
+                  onPress={() =>
+                    updateDetailDateTime(detailPickerTarget, (nextDate) => {
+                      nextDate.setFullYear(date.getFullYear(), date.getMonth(), date.getDate());
+                      return nextDate;
+                    })
+                  }
+                >
+                  <Text style={[styles.detailPickerOptionText, active && styles.detailPickerOptionTextActive]}>
+                    {formatPickerDateLabel(date)}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
+          <ScrollView style={styles.detailPickerNumberColumn} showsVerticalScrollIndicator={false}>
+            {Array.from({ length: 24 }, (_, hour) => {
+              const active = hour === selectedHour;
+              return (
+                <TouchableOpacity
+                  key={hour}
+                  style={[styles.detailPickerOption, active && styles.detailPickerOptionActive]}
+                  activeOpacity={0.72}
+                  onPress={() =>
+                    updateDetailDateTime(detailPickerTarget, (nextDate) => {
+                      nextDate.setHours(hour);
+                      return nextDate;
+                    })
+                  }
+                >
+                  <Text style={[styles.detailPickerOptionText, active && styles.detailPickerOptionTextActive]}>
+                    {String(hour).padStart(2, "0")}时
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
+          <ScrollView style={styles.detailPickerNumberColumn} showsVerticalScrollIndicator={false}>
+            {minuteOptions.map((minute) => {
+              const active = minute === selectedMinute;
+              return (
+                <TouchableOpacity
+                  key={minute}
+                  style={[styles.detailPickerOption, active && styles.detailPickerOptionActive]}
+                  activeOpacity={0.72}
+                  onPress={() =>
+                    updateDetailDateTime(detailPickerTarget, (nextDate) => {
+                      nextDate.setMinutes(minute);
+                      return nextDate;
+                    })
+                  }
+                >
+                  <Text style={[styles.detailPickerOptionText, active && styles.detailPickerOptionTextActive]}>
+                    {String(minute).padStart(2, "0")}分
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      </View>
+    );
+  };
+
+  const renderDetailPage = () => {
+    if (!detailForm) return null;
+
+    return (
+      <View style={styles.detailPage}>
+        <View style={styles.detailHeader}>
+          <TouchableOpacity style={styles.detailIconButton} onPress={closeScheduleDetail} activeOpacity={0.72}>
+            <Text style={styles.detailBackText}>‹</Text>
+          </TouchableOpacity>
+          <Text style={styles.detailHeaderTitle}>日程详情</Text>
+          <TouchableOpacity
+            style={[styles.detailSaveButton, isSavingDetail && styles.detailSaveButtonDisabled]}
+            onPress={saveScheduleDetail}
+            activeOpacity={0.78}
+            disabled={isSavingDetail}
+          >
+            <Text style={styles.detailSaveText}>{isSavingDetail ? "保存中" : "保存"}</Text>
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          style={styles.detailScroll}
+          contentContainerStyle={styles.detailContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>标题</Text>
+            <TextInput
+              style={styles.detailInput}
+              value={detailForm.title}
+              onChangeText={(value) => updateDetailField("title", value)}
+              placeholder="日程标题"
+              placeholderTextColor="#94a3b8"
+            />
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>开始时间</Text>
+            <TouchableOpacity
+              style={styles.detailTimeField}
+              activeOpacity={0.72}
+              onPress={() => setDetailPickerTarget("start_time")}
+            >
+              <Text style={styles.detailTimeFieldText}>{detailForm.start_time}</Text>
+              <Text style={styles.detailTimeFieldIcon}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>结束时间</Text>
+            <TouchableOpacity
+              style={styles.detailTimeField}
+              activeOpacity={0.72}
+              onPress={() => setDetailPickerTarget("end_time")}
+            >
+              <Text style={styles.detailTimeFieldText}>{detailForm.end_time}</Text>
+              <Text style={styles.detailTimeFieldIcon}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={styles.detailSwitchRow}
+            activeOpacity={0.72}
+            onPress={() => updateDetailField("all_day", !detailForm.all_day)}
+          >
+            <Text style={styles.detailSwitchLabel}>全天</Text>
+            <View style={[styles.detailSwitch, detailForm.all_day && styles.detailSwitchActive]}>
+              <View style={[styles.detailSwitchThumb, detailForm.all_day && styles.detailSwitchThumbActive]} />
+            </View>
+          </TouchableOpacity>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>分类</Text>
+            <View style={styles.detailChipGrid}>
+              {CATEGORIES.map((category) => {
+                const active = detailForm.category === category;
+                return (
+                  <TouchableOpacity
+                    key={category}
+                    style={[styles.detailChip, active && styles.detailChipActive]}
+                    activeOpacity={0.72}
+                    onPress={() => updateDetailField("category", category)}
+                  >
+                    <Text style={[styles.detailChipText, active && styles.detailChipTextActive]}>
+                      {categoryLabels[category]}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>提醒</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.detailReminderRow}>
+              {REMINDER_OPTIONS.map((minutes) => {
+                const active = detailForm.reminder_minutes === minutes;
+                return (
+                  <TouchableOpacity
+                    key={minutes}
+                    style={[styles.detailChip, active && styles.detailChipActive]}
+                    activeOpacity={0.72}
+                    onPress={() => updateDetailField("reminder_minutes", minutes)}
+                  >
+                    <Text style={[styles.detailChipText, active && styles.detailChipTextActive]}>
+                      {reminderLabels[minutes]}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>重复</Text>
+            <View style={styles.detailChipGrid}>
+              {Object.keys(recurrenceLabels).map((type) => {
+                const active = detailForm.recurrence.type === type;
+                return (
+                  <TouchableOpacity
+                    key={type}
+                    style={[styles.detailChip, active && styles.detailChipActive]}
+                    activeOpacity={0.72}
+                    onPress={() => updateDetailRecurrence({ type })}
+                  >
+                    <Text style={[styles.detailChipText, active && styles.detailChipTextActive]}>
+                      {recurrenceLabels[type]}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          {detailForm.recurrence.type === "weekly" && (
+            <View style={styles.detailSection}>
+              <Text style={styles.detailLabel}>重复星期</Text>
+              <View style={styles.detailChipGrid}>
+                {WEEKDAYS.map((weekday) => {
+                  const active = detailForm.recurrence.weekdays.includes(weekday);
+                  return (
+                    <TouchableOpacity
+                      key={weekday}
+                      style={[styles.detailChip, active && styles.detailChipActive]}
+                      activeOpacity={0.72}
+                      onPress={() => toggleDetailWeekday(weekday)}
+                    >
+                      <Text style={[styles.detailChipText, active && styles.detailChipTextActive]}>
+                        {weekdayLabels[weekday]}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
+          )}
+
+          {detailForm.recurrence.type !== "none" && (
+            <TouchableOpacity
+              style={styles.detailSwitchRow}
+              activeOpacity={0.72}
+              onPress={() => updateDetailRecurrence({ skip_holidays: !detailForm.recurrence.skip_holidays })}
+            >
+              <Text style={styles.detailSwitchLabel}>跳过节假日</Text>
+              <View style={[styles.detailSwitch, detailForm.recurrence.skip_holidays && styles.detailSwitchActive]}>
+                <View
+                  style={[
+                    styles.detailSwitchThumb,
+                    detailForm.recurrence.skip_holidays && styles.detailSwitchThumbActive
+                  ]}
+                />
+              </View>
+            </TouchableOpacity>
+          )}
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>地点</Text>
+            <TextInput
+              style={styles.detailInput}
+              value={detailForm.location}
+              onChangeText={(value) => updateDetailField("location", value)}
+              placeholder="地点"
+              placeholderTextColor="#94a3b8"
+            />
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>参与人</Text>
+            <TextInput
+              style={styles.detailInput}
+              value={detailForm.participants_text}
+              onChangeText={(value) => updateDetailField("participants_text", value)}
+              placeholder="用逗号分隔"
+              placeholderTextColor="#94a3b8"
+            />
+          </View>
+
+          <View style={styles.detailSection}>
+            <Text style={styles.detailLabel}>备注</Text>
+            <TextInput
+              style={[styles.detailInput, styles.detailTextArea]}
+              value={detailForm.description}
+              onChangeText={(value) => updateDetailField("description", value)}
+              placeholder="补充说明"
+              placeholderTextColor="#94a3b8"
+              multiline
+              textAlignVertical="top"
+            />
+          </View>
+
+          {Boolean(detailError) && <Text style={styles.detailError}>{detailError}</Text>}
+        </ScrollView>
+        {renderDateTimePicker()}
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style="dark" />
       <View style={styles.app}>
+        {detailSchedule ? (
+          renderDetailPage()
+        ) : (
+          <>
         <TopBar title={displayedNavigationTitle} titleOpacity={navigationTitleOpacity} />
 
         <View
@@ -1003,6 +1802,9 @@ export default function App() {
               { height: calendarHeight }
             )}
           <Animated.View
+            collapsable={false}
+            renderToHardwareTextureAndroid
+            shouldRasterizeIOS
             style={[
               styles.dayPagerTrack,
               {
@@ -1019,10 +1821,15 @@ export default function App() {
 
           {renderCalendarMeasurer()}
 
-          <TouchableOpacity style={styles.fixedSummary} activeOpacity={0.82}>
+          <TouchableOpacity
+            style={styles.fixedSummary}
+            activeOpacity={0.82}
+            onPress={() => nextEvent?.id && openScheduleDetail(nextEvent.id)}
+            disabled={!nextEvent?.id}
+          >
             <Text style={styles.summaryLabel}>下一项</Text>
-            <Text style={styles.summaryTime}>18:30</Text>
-            <Text style={styles.summaryEvent}>晚餐</Text>
+            <Text style={styles.summaryTime}>{nextEvent?.time || "--:--"}</Text>
+            <Text style={styles.summaryEvent}>{nextEvent?.title || "暂无日程"}</Text>
             <View style={styles.summarySpacer} />
             <Text style={styles.summaryChevron}>›</Text>
           </TouchableOpacity>
@@ -1049,6 +1856,8 @@ export default function App() {
           voicePulseAStyle={voicePulseAStyle}
           voicePulseBStyle={voicePulseBStyle}
         />
+          </>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -1064,6 +1873,242 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingTop: 12,
     backgroundColor: "#f8fbff"
+  },
+  detailPage: {
+    flex: 1,
+    paddingHorizontal: PAGE_HORIZONTAL_PADDING
+  },
+  detailHeader: {
+    height: 56,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between"
+  },
+  detailIconButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#eef6ff",
+    borderWidth: 1,
+    borderColor: "#dbeafe"
+  },
+  detailBackText: {
+    color: "#0f172a",
+    fontSize: 30,
+    lineHeight: 32,
+    fontWeight: "500"
+  },
+  detailHeaderTitle: {
+    color: "#0f172a",
+    fontSize: 18,
+    fontWeight: "900"
+  },
+  detailSaveButton: {
+    height: 40,
+    minWidth: 66,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 16,
+    backgroundColor: "#2563eb"
+  },
+  detailSaveButtonDisabled: {
+    opacity: 0.62
+  },
+  detailSaveText: {
+    color: "#ffffff",
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  detailScroll: {
+    flex: 1
+  },
+  detailContent: {
+    paddingTop: 10,
+    paddingBottom: 34,
+    gap: 14
+  },
+  detailSection: {
+    gap: 8
+  },
+  detailLabel: {
+    color: "#475569",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  detailInput: {
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: "#0f172a",
+    fontSize: 15,
+    fontWeight: "700"
+  },
+  detailTextArea: {
+    minHeight: 104
+  },
+  detailHint: {
+    color: "#94a3b8",
+    fontSize: 12,
+    fontWeight: "600"
+  },
+  detailTimeField: {
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center"
+  },
+  detailTimeFieldText: {
+    flex: 1,
+    color: "#0f172a",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  detailTimeFieldIcon: {
+    color: "#94a3b8",
+    fontSize: 26,
+    lineHeight: 28,
+    fontWeight: "400"
+  },
+  detailPickerPanel: {
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
+    backgroundColor: "#ffffff",
+    padding: 12,
+    marginBottom: 12,
+    shadowColor: "#0f172a",
+    shadowOpacity: 0.08,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6
+  },
+  detailPickerHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10
+  },
+  detailPickerTitle: {
+    color: "#0f172a",
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  detailPickerDone: {
+    color: "#2563eb",
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  detailPickerColumns: {
+    height: 168,
+    flexDirection: "row",
+    gap: 8
+  },
+  detailPickerDateColumn: {
+    flex: 1.55
+  },
+  detailPickerNumberColumn: {
+    flex: 1
+  },
+  detailPickerOption: {
+    height: 38,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 6,
+    backgroundColor: "#f8fbff"
+  },
+  detailPickerOptionActive: {
+    backgroundColor: "#2563eb"
+  },
+  detailPickerOptionText: {
+    color: "#475569",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  detailPickerOptionTextActive: {
+    color: "#ffffff"
+  },
+  detailChipGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8
+  },
+  detailReminderRow: {
+    gap: 8,
+    paddingRight: 12
+  },
+  detailChip: {
+    minHeight: 38,
+    borderRadius: 19,
+    paddingHorizontal: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "#dbeafe",
+    backgroundColor: "#ffffff"
+  },
+  detailChipActive: {
+    borderColor: "#2563eb",
+    backgroundColor: "#2563eb"
+  },
+  detailChipText: {
+    color: "#475569",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  detailChipTextActive: {
+    color: "#ffffff"
+  },
+  detailSwitchRow: {
+    minHeight: 52,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#dbeafe",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between"
+  },
+  detailSwitchLabel: {
+    color: "#0f172a",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  detailSwitch: {
+    width: 46,
+    height: 28,
+    borderRadius: 14,
+    padding: 3,
+    backgroundColor: "#cbd5e1"
+  },
+  detailSwitchActive: {
+    backgroundColor: "#2563eb"
+  },
+  detailSwitchThumb: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: "#ffffff"
+  },
+  detailSwitchThumbActive: {
+    transform: [{ translateX: 18 }]
+  },
+  detailError: {
+    color: "#dc2626",
+    fontSize: 13,
+    fontWeight: "800"
   },
   date: {
     color: "#0f172a",
@@ -1255,11 +2300,28 @@ const styles = StyleSheet.create({
     position: "relative",
     width: "100%"
   },
+  emptyTimeline: {
+    minHeight: 180,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingTop: 28
+  },
+  emptyTimelineTitle: {
+    color: "#64748b",
+    fontSize: 16,
+    fontWeight: "800"
+  },
+  emptyTimelineMeta: {
+    color: "#94a3b8",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 8
+  },
   timelineTrack: {
     position: "absolute",
     left: 69,
     top: MARKER_CENTER_Y,
-    height: EVENT_ROW_HEIGHT * (events.length - 1),
+    height: 0,
     width: 2,
     borderRadius: 1,
     backgroundColor: "#e2e8f0"

@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 const toneColors = {
   soft: { dot: "#3b82f6", card: { backgroundColor: "#eef6ff", borderColor: "#bfdbfe" } },
@@ -7,8 +7,30 @@ const toneColors = {
   warm: { dot: "#8b5cf6", card: { backgroundColor: "#f8fbff", borderColor: "#bfdbfe" } },
 };
 
-export default function EventRow({ event }) {
+function formatReminder(minutes) {
+  switch (minutes) {
+    case 0:
+      return "准时";
+    case 60:
+      return "1小时";
+    case 120:
+      return "2小时";
+    case 1440:
+      return "1天";
+    case 2880:
+      return "2天";
+    case 4320:
+      return "3天";
+    case 10080:
+      return "1周";
+    default:
+      return `${minutes}分钟`;
+  }
+}
+
+export default function EventRow({ event, onPress }) {
   const tone = toneColors[event.tone] || toneColors.soft;
+  const CardComponent = onPress ? TouchableOpacity : View;
 
   return (
     <View style={styles.eventRow}>
@@ -18,18 +40,21 @@ export default function EventRow({ event }) {
       <View style={styles.markerColumn}>
         <View style={[styles.markerDot, { backgroundColor: tone.dot }]} />
       </View>
-      <View style={[styles.eventCard, tone.card]}>
+      <CardComponent
+        style={[styles.eventCard, tone.card]}
+        {...(onPress ? { activeOpacity: 0.78, onPress } : {})}
+      >
         <View>
           <Text style={styles.eventTitle}>{event.title}</Text>
-          <Text style={styles.eventMeta}>{event.meta}</Text>
+          {Boolean(event.meta) && <Text style={styles.eventMeta}>{event.meta}</Text>}
         </View>
-        {event.title === "项目评审" && (
+        {event.reminderMinutes !== undefined && event.reminderMinutes !== null && (
           <View style={styles.eventBadge}>
             <Text style={styles.eventBadgeIcon}>!</Text>
-            <Text style={styles.eventBadgeText}>10分钟</Text>
+            <Text style={styles.eventBadgeText}>{formatReminder(event.reminderMinutes)}</Text>
           </View>
         )}
-      </View>
+      </CardComponent>
     </View>
   );
 }
