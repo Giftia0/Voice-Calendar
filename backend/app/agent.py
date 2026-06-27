@@ -110,14 +110,11 @@ class CalendarAgent:
             messages.append(self._to_langchain_message(turn))
 
         trace: list[dict[str, Any]] = []
-        last_assistant_message: dict[str, Any] = {"role": "assistant", "content": ""}
-
         for _ in range(6):
             response = model.invoke(messages)
             messages.append(response)
             tool_calls = [self._normalize_tool_call(call) for call in (getattr(response, "tool_calls", []) or [])]
             content = response.content if isinstance(response.content, str) else json.dumps(response.content, ensure_ascii=False)
-            last_assistant_message = self._assistant_message(content, tool_calls)
             trace.append({"type": "model", "content": content, "tool_calls": tool_calls})
 
             if not tool_calls:
@@ -131,10 +128,11 @@ class CalendarAgent:
 
             ask_user = next((call for call in tool_calls if call["name"] == "ask_user"), None)
             if ask_user:
+                reply = ask_user.get("arguments", {}).get("question") or content or "我需要再确认一下。"
                 return AgentRunResult(
                     status="needs_user_input",
-                    reply=ask_user.get("arguments", {}).get("question") or content or "我需要再确认一下。",
-                    assistant_message=last_assistant_message,
+                    reply=reply,
+                    assistant_message={"role": "assistant", "content": reply},
                     tool_calls=[],
                     trace=trace,
                 )
@@ -243,15 +241,7 @@ class CalendarAgent:
         role = turn.get("role")
         content = turn.get("content") or ""
         if role == "assistant":
-            tool_calls = []
-            for call in turn.get("tool_calls", []) or []:
-                function = call.get("function", {})
-                try:
-                    args = json.loads(function.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                tool_calls.append({"id": call.get("id") or function.get("name"), "name": function.get("name"), "args": args})
-            return AIMessage(content=content, tool_calls=tool_calls)
+            return AIMessage(content=content)
         if role == "tool":
             return ToolMessage(content=content, tool_call_id=turn.get("tool_call_id") or turn.get("name") or "tool")
         return HumanMessage(content=content)
