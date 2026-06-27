@@ -251,7 +251,7 @@ class CalendarAgent:
                 except json.JSONDecodeError:
                     args = {}
                 tool_calls.append({"id": call.get("id") or function.get("name"), "name": function.get("name"), "args": args})
-            return AIMessage(content=content, tool_calls=tool_calls or None)
+            return AIMessage(content=content, tool_calls=tool_calls)
         if role == "tool":
             return ToolMessage(content=content, tool_call_id=turn.get("tool_call_id") or turn.get("name") or "tool")
         return HumanMessage(content=content)
